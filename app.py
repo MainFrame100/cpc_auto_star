@@ -52,14 +52,155 @@ class Token(db.Model):
 # print("База данных и таблицы проверены/созданы.") # Для отладки
 # --------------------------------------------- 
 
+# --- Функция для получения действительного токена --- 
+def get_valid_token(client_login):
+    """
+    Находит токен в БД по логину, проверяет срок действия.
+    Если истек, пытается обновить (пока заглушка).
+    Возвращает действительный access_token или None.
+    """
+    if not client_login:
+        print("Ошибка: client_login не передан в get_valid_token")
+        return None
+
+    token_entry = Token.query.filter_by(yandex_login=client_login).first()
+
+    if not token_entry:
+        print(f"Токен для {client_login} не найден в БД.")
+        return None
+
+    # Проверяем, не истек ли токен (с запасом в 1 минуту)
+    if datetime.utcnow() < token_entry.expires_at - timedelta(minutes=1):
+        print(f"Действующий токен для {client_login} найден в БД.")
+        return token_entry.access_token
+    else:
+        print(f"Токен для {client_login} истек или скоро истечет.")
+        # Токен истек, пытаемся обновить
+        if not token_entry.refresh_token:
+            print(f"Refresh token для {client_login} отсутствует. Требуется переавторизация.")
+            return None # Нет refresh_token, обновить не можем
+
+        # ----- ЗАГЛУШКА: Вызов функции обновления (будет реализована в Подзадаче 3.2) -----
+        print(f"Пытаемся обновить токен для {client_login} с помощью refresh_token...")
+        success = refresh_access_token(token_entry) # Вызываем функцию обновления
+        # ---------------------------------------------------------------------------
+
+        if success:
+            print(f"Токен для {client_login} успешно обновлен.")
+            # Функция refresh_access_token должна была обновить token_entry в БД
+            # и вернуть True. Теперь мы можем вернуть новый access_token.
+            return token_entry.access_token # Возвращаем уже обновленный токен
+        else:
+            print(f"Не удалось обновить токен для {client_login}.")
+            # Обновление не удалось (например, refresh_token невалиден)
+            return None
+
+# --- Функция для обновления access_token --- 
+def refresh_access_token(token_entry):
+    """Обновляет access_token с помощью refresh_token.
+    Обновляет запись token_entry в БД и возвращает True при успехе, False при неудаче.
+    """
+    print(f"Попытка обновления токена для {token_entry.yandex_login} через refresh_token.")
+
+    if not token_entry.refresh_token:
+        print(f"Ошибка: Refresh token для {token_entry.yandex_login} отсутствует.")
+        return False
+
+    # Проверяем наличие ID и секрета приложения
+    if not YANDEX_CLIENT_ID or not YANDEX_CLIENT_SECRET:
+        print("Ошибка: YANDEX_CLIENT_ID или YANDEX_CLIENT_SECRET не найдены в .env.")
+        return False
+
+    token_url = 'https://oauth.yandex.ru/token'
+    payload = {
+        'grant_type': 'refresh_token',
+        'refresh_token': token_entry.refresh_token,
+        'client_id': YANDEX_CLIENT_ID,
+        'client_secret': YANDEX_CLIENT_SECRET
+    }
+
+    try:
+        response = requests.post(token_url, data=payload)
+        response_data = response.json() # Получаем ответ в любом случае
+
+        # Проверяем на ошибки OAuth Яндекса
+        if response.status_code != 200:
+            error = response_data.get('error')
+            error_description = response_data.get('error_description', 'Нет описания')
+            print(f"Ошибка обновления токена для {token_entry.yandex_login}. Статус: {response.status_code}. Ошибка: {error}. Описание: {error_description}")
+            
+            # Если ошибка связана с невалидным refresh_token, удаляем его из БД
+            # Коды ошибок можно найти в документации Яндекс OAuth, например, invalid_grant
+            if error == 'invalid_grant': 
+                print(f"Невалидный refresh_token для {token_entry.yandex_login}. Удаляем его из БД.")
+                token_entry.refresh_token = None
+                try:
+                    db.session.commit()
+                except Exception as e_commit:
+                    print(f"Ошибка при удалении невалидного refresh_token из БД: {e_commit}")
+                    db.session.rollback()
+            return False
+
+        # Успешное обновление
+        new_access_token = response_data['access_token']
+        new_expires_in = response_data['expires_in']
+        # Яндекс может вернуть новый refresh_token, а может и не вернуть
+        new_refresh_token = response_data.get('refresh_token') 
+
+        new_expires_at = datetime.utcnow() + timedelta(seconds=new_expires_in)
+
+        # Обновляем данные в объекте token_entry
+        token_entry.access_token = new_access_token
+        token_entry.expires_at = new_expires_at
+        if new_refresh_token:
+            print(f"Получен НОВЫЙ refresh_token для {token_entry.yandex_login}. Обновляем.")
+            token_entry.refresh_token = new_refresh_token
+        
+        # Сохраняем изменения в БД
+        db.session.commit()
+        print(f"Токен для {token_entry.yandex_login} успешно обновлен в БД.")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        print(f"Сетевая ошибка при обновлении токена для {token_entry.yandex_login}: {e}")
+        db.session.rollback() # Откатываем на случай, если что-то успело поменяться
+        return False
+    except KeyError as e:
+        print(f"Ошибка: Отсутствует ключ '{e}' в ответе при обновлении токена для {token_entry.yandex_login}. Ответ: {response_data}")
+        db.session.rollback()
+        return False
+    except Exception as e:
+        print(f"Непредвиденная ошибка при обновлении токена для {token_entry.yandex_login}: {e}")
+        db.session.rollback()
+        return False
+
 @app.route('/')
 def index():
     """
-    Главная страница. Отображает ссылку для входа через Яндекс.
+    Главная страница. Отображает ссылку для входа и сообщения.
     """
+    message = request.args.get('message')
+    login_link = f'<a href="{url_for('login_yandex')}">Войти через Яндекс</a>'
+    status_html = ""
+    
+    # Проверим, есть ли пользователь в сессии и есть ли для него токен
+    client_login = session.get('yandex_client_login')
+    if client_login:
+        token_entry = Token.query.filter_by(yandex_login=client_login).first()
+        if token_entry:
+            status_html = f"<p>Вы вошли как: {client_login}. <a href='{url_for('test_api_call')}'>Проверить API</a> | <a href='{url_for('logout')}'>Выйти</a></p>"
+            # Убираем ссылку на вход, если уже вошли
+            login_link = ""
+        else:
+            # Есть логин в сессии, но нет токена в БД? Странно, лучше выйти.
+            session.pop('yandex_client_login', None)
+            status_html = "<p>Ошибка: Найден логин в сессии, но нет токена в БД. Сессия очищена.</p>"
+
     return f"""
     <h1>CPC Auto Helper - Вход</h1>
-    <p><a href="{url_for('login_yandex')}">Войти через Яндекс</a></p>
+    { f'<p style="color:blue;">{message}</p>' if message else '' }
+    { status_html }
+    { login_link }
     """
 
 @app.route('/login/yandex')
@@ -227,25 +368,24 @@ def get_token():
 def test_api_call():
     """
     Выполняет тестовый запрос к API Яндекс.Директа (песочница),
-    используя токен, полученный из БД.
+    используя действительный токен, полученный через get_valid_token.
     """
     # --- 1. Получение логина пользователя из сессии --- 
     client_login = session.get('yandex_client_login')
     if not client_login:
-        # Если логина в сессии нет, пользователь не авторизован (или сессия истекла)
-        return "Ошибка: Логин пользователя не найден в сессии. Попробуйте <a href='/'>войти</a> заново.", 400
+        return redirect(url_for('index', message="Сессия истекла или пользователь не авторизован. Войдите заново."))
 
-    # --- 2. Получение токена из Базы Данных --- 
-    token_entry = Token.query.filter_by(yandex_login=client_login).first()
+    # --- 2. Получение действительного токена --- 
+    access_token = get_valid_token(client_login)
 
-    if not token_entry:
-        # Если записи в БД нет для этого логина
-        return f"Ошибка: Токен для пользователя '{client_login}' не найден в базе данных. Попробуйте <a href='/'>войти</a> заново, чтобы сохранить токен.", 404 # 404 Not Found
+    if not access_token:
+        # Токен не найден, истек и не может быть обновлен, или ошибка обновления
+        # Отправляем пользователя на переавторизацию
+        session.pop('yandex_client_login', None) # Очищаем логин из сессии
+        return redirect(url_for('index', message="Не удалось получить действительный токен. Пожалуйста, авторизуйтесь снова."))
 
-    # Получаем access_token из записи БД
-    access_token = token_entry.access_token
-
-    # --- 3. Формирование запроса к API Директа (остается почти без изменений) --- 
+    # --- 3. Формирование запроса к API Директа --- 
+    # (Логика запроса остается прежней, используем полученный access_token)
     api_endpoint = DIRECT_API_SANDBOX_URL + 'campaigns'
 
     headers_direct = {
@@ -320,6 +460,13 @@ def test_api_call():
         return f"Ошибка декодирования JSON ответа от API Директа: {e}<br>Ответ сервера: {response.text}", 500
     except Exception as e:
         return f"Непредвиденная ошибка при вызове API Директа: {e}", 500
+
+# --- Роут для выхода --- 
+@app.route('/logout')
+def logout():
+    """ Очищает сессию пользователя. """
+    session.pop('yandex_client_login', None)
+    return redirect(url_for('index', message="Вы успешно вышли."))
 
 if __name__ == '__main__':
     # Запускаем Flask сервер для локальной разработки
