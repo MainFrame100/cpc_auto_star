@@ -3,7 +3,7 @@ import json
 import time
 import io
 import csv
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 # URL API Отчетов (песочница)
 REPORTS_API_SANDBOX_URL = 'https://api-sandbox.direct.yandex.com/json/v5/reports'
@@ -29,21 +29,20 @@ def fetch_placement_report(access_token: str, client_login: str, campaign_id: in
     print(f"Запуск fetch_placement_report для campaign_id={campaign_id}, client_login={client_login}")
 
     # --- 1. Заказ отчета --- 
-    headers = {
+    headers_post = {
         'Authorization': f'Bearer {access_token}',
         'Client-Login': client_login,
         'Accept-Language': 'ru',
         'Content-Type': 'application/json',
-        'returnMoneyInMicros': 'false', # Получать денежные значения в валюте клиента
-        # 'skipReportHeader': 'true', # Можно раскомментировать, чтобы пропустить шапку
-        # 'skipReportSummary': 'true' # Можно раскомментировать, чтобы пропустить итоги
+        'returnMoneyInMicros': 'false', 
+        'skipReportHeader': 'true',
+        'skipReportSummary': 'true'
     }
+    if not client_login:
+        headers_post.pop('Client-Login', None)
 
-    # Определяем диапазон дат (например, последние 14 дней)
-    date2 = date.today()
-    date1 = date2 - timedelta(days=14)
-
-    # Формируем тело запроса (ReportDefinition)
+    # Уникальное имя отчета
+    timestamp_unique = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     report_definition = {
         'params': {
             'SelectionCriteria': {
@@ -65,7 +64,7 @@ def fetch_placement_report(access_token: str, client_login: str, campaign_id: in
                 'Cost',
                 'BounceRate'
             ],
-            'ReportName': f'Custom Placement Report for Campaign {campaign_id} - Last 30 days',
+            'ReportName': f'Custom Placement Report for Campaign {campaign_id} - {timestamp_unique}',
             'ReportType': 'CUSTOM_REPORT',
             'DateRangeType': 'LAST_30_DAYS',
             'Format': 'TSV',
@@ -76,197 +75,95 @@ def fetch_placement_report(access_token: str, client_login: str, campaign_id: in
         }
     }
 
-    try:
-        print("Отправка запроса на заказ отчета...")
-        # Используем параметр json вместо data, requests сам сделает dumps и поставит Content-Type
-        response = requests.post(REPORTS_API_SANDBOX_URL, headers=headers, json=report_definition)
-        
-        # Проверяем статус ответа СРАЗУ
-        # Успешные статусы для постановки в очередь: 201, 202. 
-        # Статус 200 здесь маловероятен, но допустим.
-        if response.status_code in [200, 201, 202]:
-             print(f"Запрос на отчет успешно отправлен или уже обрабатывается. Статус: {response.status_code}")
-        else:
-            # Если статус другой, это ошибка - пытаемся обработать ее как HTTPError
-            response.raise_for_status() 
-
-    # Ловим конкретно HTTP ошибки (4xx, 5xx)
-    except requests.exceptions.HTTPError as e_http:
-        error_msg = f"Ошибка HTTP при заказе отчета: {e_http}. "
-        try:
-            # Пытаемся получить JSON с деталями ошибки
-            error_details = response.json().get('error')
-            if error_details:
-                 error_msg += f"API Error: Код {error_details.get('error_code', 'N/A')}, {error_details.get('error_string', 'N/A')}: {error_details.get('error_detail', 'N/A')}"
-            else:
-                error_msg += f"Тело ответа: {response.text}" # Если JSON не содержит 'error'
-        except json.JSONDecodeError:
-             error_msg += f"Не удалось разобрать JSON из тела ответа: {response.text}" # Если ответ не JSON
-        except Exception as e_json:
-            error_msg += f"Ошибка при обработке JSON из тела ответа: {e_json}. Тело: {response.text}"
-        print(error_msg)
-        return None, None, error_msg # Возвращаем (None, None, ошибка)
-
-    except requests.exceptions.RequestException as e:
-        # Ловим остальные сетевые ошибки (timeout, connection error и т.д.)
-        error_msg = f"Сетевая ошибка при заказе отчета (не HTTP): {e}"
-        print(error_msg)
-        return None, None, error_msg
-    except Exception as e:
-        # Ловим совсем непредвиденные ошибки
-        error_msg = f"Непредвиденная ошибка при заказе отчета: {e}"
-        print(error_msg)
-        return None, None, error_msg
-
-    # --- 2. Ожидание готовности отчета --- 
     report_data_raw = None
-    for i in range(MAX_RETRIES):
-        try:
-            print(f"Попытка {i + 1}/{MAX_RETRIES}: Проверка статуса отчета...")
-            # Повторно отправляем тот же запрос
-            response = requests.post(REPORTS_API_SANDBOX_URL, headers=headers, data=json.dumps(report_definition))
+    retries = 0 # Добавим счетчик попыток для отладки/ограничения
+    MAX_REPORT_RETRIES = 20 # Ограничим общее число попыток
 
-            # Код 200: Отчет готов и содержится в теле ответа
-            if response.status_code == 200:
+    while retries < MAX_REPORT_RETRIES:
+        retries += 1
+        print(f"Попытка {retries}/{MAX_REPORT_RETRIES}: Отправка POST-запроса для заказа/проверки отчета...")
+        try:
+            # ВСЕГДА отправляем POST
+            response = requests.post(REPORTS_API_SANDBOX_URL, headers=headers_post, json=report_definition)
+            
+            status_code = response.status_code
+            request_id = response.headers.get("RequestId", "N/A")
+            print(f"  Статус ответа: {status_code}. RequestId: {request_id}")
+
+            # Код 200: Отчет готов
+            if status_code == 200:
                 print("Отчет готов!")
-                report_data_raw = response.text # Получаем сырой текст отчета
-                break # Выходим из цикла ожидания
+                report_data_raw = response.text
+                break # Выходим из цикла
+
+            # Код 201/202: Отчет формируется, ждем
+            elif status_code in [201, 202]:
+                retry_interval = int(response.headers.get("retryIn", 30))
+                print(f"Отчет формируется. Повторная проверка через {retry_interval} секунд...")
+                time.sleep(retry_interval)
+                continue # Продолжаем цикл (снова отправим POST)
             
-            # Код 201/202: Отчет еще формируется, ждем
-            elif response.status_code in [201, 202]:
-                print(f"Отчет еще не готов (статус {response.status_code}). Ожидание {RETRY_DELAY_SECONDS} сек...")
-                time.sleep(RETRY_DELAY_SECONDS)
-                continue # Переходим к следующей попытке
-            
-            # Другие коды состояния HTTP = ошибка
+            # Любой другой статус = Ошибка
             else:
-                response.raise_for_status() # Вызовет HTTPError для обработки ниже
+                response.raise_for_status()
 
         except requests.exceptions.HTTPError as e_http:
-            # Пытаемся извлечь ошибку API Директа из тела ответа
-            try:
-                error_details = response.json().get('error')
-                if error_details:
-                     error_msg = f"Ошибка API при проверке статуса отчета: Код {error_details.get('error_code', 'N/A')}, {error_details.get('error_string', 'N/A')}: {error_details.get('error_detail', 'N/A')}"
-                else:
-                    error_msg = f"Ошибка HTTP {response.status_code} при проверке статуса отчета. Тело ответа: {response.text}"
-            except json.JSONDecodeError:
-                error_msg = f"Ошибка HTTP {response.status_code} при проверке статуса отчета. Не удалось разобрать тело ответа: {response.text}"
-            
+            error_msg = f"Ошибка HTTP: {e_http}. "
+            try: error_msg += response.text 
+            except Exception: pass
             print(error_msg)
-            return None, None, error_msg
-        
+            # Выходим при ошибке (можно добавить логику повтора для 5xx)
+            return None, None, error_msg 
         except requests.exceptions.RequestException as e:
-            error_msg = f"Сетевая ошибка при проверке статуса отчета: {e}"
+            error_msg = f"Сетевая ошибка: {e}. Повтор через 60 сек..."
             print(error_msg)
-            # Возможно, стоит продолжить попытки при временных сетевых сбоях
-            # Но для простоты пока выходим
-            return None, None, error_msg
+            time.sleep(60)
+            # Не сбрасываем флаг, продолжаем тот же POST
+            continue # Продолжаем цикл
         except Exception as e:
-            error_msg = f"Непредвиденная ошибка при ожидании отчета: {e}"
+            error_msg = f"Непредвиденная ошибка: {e}"
             print(error_msg)
             return None, None, error_msg
 
+    # Сюда попадаем после break (успех) или исчерпания retries
     if report_data_raw is None:
-        error_msg = f"Отчет не был готов после {MAX_RETRIES} попыток."
-        print(error_msg)
-        return None, None, error_msg
+         error_msg = f"Отчет не был готов после {MAX_REPORT_RETRIES} попыток."
+         print(error_msg)
+         return None, None, error_msg
 
     # --- 3. Парсинг отчета (TSV) --- 
-    parsed_data = None
+    parsed_data = [] # Инициализируем пустой список
     parsing_error_msg = None
     try:
-        print("Парсинг TSV данных...")
+        print("Парсинг TSV данных (упрощенный)...")
         report_file = io.StringIO(report_data_raw)
         
-        # --- Улучшенное определение заголовков --- 
-        headers_list = []
-        lines_to_skip = 0
-        expected_headers = report_definition['params']['FieldNames']
-
-        # Читаем первые несколько строк, чтобы найти заголовки
-        line1_raw = report_file.readline().strip()
-        line2_raw = report_file.readline().strip()
+        # Создаем csv.reader
+        tsv_reader = csv.reader(report_file, delimiter='\t')
         
-        print(f"Line 1 raw: {line1_raw}")
-        print(f"Line 2 raw: {line2_raw}")
-
-        # Пытаемся распарсить вторую строку как TSV
+        # Первая строка теперь - это заголовки
         try:
-            line2_reader = csv.reader([line2_raw], delimiter='\t')
-            potential_headers = next(line2_reader)
-            # Проверяем, содержит ли вторая строка ожидаемые заголовки
-            if all(header in potential_headers for header in expected_headers):
-                print("Обнаружены заголовки во второй строке.")
-                headers_list = potential_headers
-                lines_to_skip = 2 # Пропустили 2 строки (титул + заголовки)
-            else:
-                 print("Вторая строка не похожа на заголовки. Попробуем первую.")
-                 # Если вторая не подошла, пробуем первую
-                 line1_reader = csv.reader([line1_raw], delimiter='\t')
-                 potential_headers_1 = next(line1_reader)
-                 if all(header in potential_headers_1 for header in expected_headers):
-                     print("Обнаружены заголовки в первой строке.")
-                     headers_list = potential_headers_1
-                     lines_to_skip = 1 # Пропустили только строку заголовков
-                     # Нужно "вернуть" вторую строку для чтения как данные
-                     report_file = io.StringIO(line2_raw + '\n' + report_file.read())
-                 else:
-                     print("Не удалось найти строку заголовков в первых двух строках.")
-                     # Можно либо вызвать ошибку, либо попробовать использовать expected_headers
-                     # error_msg = "Не найдена строка заголовков в отчете."
-                     # print(error_msg)
-                     # return None, error_msg
-                     print("Предупреждение: Используем ожидаемые заголовки FieldNames.")
-                     headers_list = expected_headers
-                     # Пытаемся определить, сколько строк пропустить
-                     if report_definition['params']['ReportName'] in line1_raw:
-                         lines_to_skip = 2 # Пропускаем титул и предполагаемые данные
-                         report_file = io.StringIO(report_file.read()) # Начать читать с 3й строки
-                     else:
-                         lines_to_skip = 0 # Ничего не пропускаем, читаем всё с начала
-                         report_file = io.StringIO(report_data_raw) # Начать читать с начала
-        except Exception as e_header:
-            error_msg = f"Ошибка при определении заголовков: {e_header}"
+            headers_list = next(tsv_reader)
+            print(f"Заголовки столбцов из отчета: {headers_list}")
+        except StopIteration:
+            error_msg = "Ошибка парсинга: Отчет не содержит строку с заголовками столбцов (пустой отчет?)."
             print(error_msg)
-            return None, None, error_msg
-
-        # Если строки пропускались, создаем новый reader с правильной позиции
-        # (Если lines_to_skip = 1 или 2, report_file уже был пересоздан выше)
-        if lines_to_skip == 0:
-             tsv_reader = csv.reader(report_file, delimiter='\t')
-        elif lines_to_skip == 1:
-             # Пропускаем заголовки (которые были первой строкой)
-             # report_file уже содержит line2 + остаток
-             tsv_reader = csv.reader(report_file, delimiter='\t')
-        elif lines_to_skip == 2:
-             # Пропускаем 2 строки (титул+заголовки)
-             # report_file уже содержит остаток начиная с 3й строки
-             tsv_reader = csv.reader(report_file, delimiter='\t')
-        # Если заголовки не были найдены, но мы решили продолжить
-        elif not headers_list: # На случай, если логика выше изменится и headers_list будет пуст
-             error_msg = "Критическая ошибка: не удалось определить заголовки для парсинга."
+            # Возвращаем пустой список данных, сырые данные и ошибку парсинга
+            return [], report_data_raw, error_msg 
+        except csv.Error as e_header_csv:
+             error_msg = f"Ошибка CSV при чтении заголовков: {e_header_csv}"
              print(error_msg)
-             return None, None, error_msg
-             
-        print(f"Используемые заголовки: {headers_list}")
-        print(f"Пропущено строк перед данными: {lines_to_skip}")
-        
-        # Читаем остальные строки с данными
-        parsed_data = []
+             return [], report_data_raw, error_msg
+
+        # Остальные строки - данные
         rows_processed = 0
         for row in tsv_reader:
             rows_processed += 1
-            # ИСПРАВЛЕНИЕ: Пропускаем только полностью пустые строки
-            if not row: 
-                continue
-            # Пропускаем строку итогов (проверка остается)
-            # Используем безопасный доступ к первому элементу на случай коротких строк
-            first_cell = row[0].strip().lower() if len(row) > 0 else ""
-            if first_cell.startswith('total') or first_cell.startswith('итого'):
-                print(f"Пропущена строка итогов: {row}")
+            if not row: # Пропускаем пустые строки (на всякий случай)
                 continue
                 
+            # Строку итогов проверять не нужно, так как включен skipReportSummary
+            
             row_dict = {}
             for i, header in enumerate(headers_list):
                 if i < len(row):
@@ -285,14 +182,17 @@ def fetch_placement_report(access_token: str, client_login: str, campaign_id: in
                     row_dict[header] = None
             parsed_data.append(row_dict)
 
-        print(f"Парсинг завершен. Обработано строк ридером: {rows_processed}. Сохранено строк данных: {len(parsed_data)}.")
-        return parsed_data, report_data_raw, None # Успех!
+        print(f"Парсинг завершен. Прочитано строк данных: {rows_processed}. Сохранено строк данных: {len(parsed_data)}.")
+        # Успех: возвращаем распарсенные данные, сырые данные, None (нет ошибки)
+        return parsed_data, report_data_raw, None 
 
     except csv.Error as e_csv:
-        parsing_error_msg = f"Ошибка CSV парсинга: {e_csv}"
+        parsing_error_msg = f"Ошибка CSV парсинга данных: {e_csv}"
         print(parsing_error_msg)
-        return None, None, parsing_error_msg
+        # Возвращаем None (т.к. данные некорректны), сырые данные и ошибку
+        return None, report_data_raw, parsing_error_msg 
     except Exception as e:
         parsing_error_msg = f"Непредвиденная ошибка при парсинге отчета: {e}"
         print(parsing_error_msg)
-        return None, None, parsing_error_msg 
+        # Возвращаем None, сырые данные и ошибку
+        return None, report_data_raw, parsing_error_msg 
