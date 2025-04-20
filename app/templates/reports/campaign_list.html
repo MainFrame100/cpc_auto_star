@@ -3,58 +3,254 @@
 {% block title %}Список кампаний - CPC Auto Helper{% endblock %}
 
 {% block content %}
-    <h2>Список Кампаний для {{ client_login }}</h2>
-
-    {# Кнопки для запуска сбора/обновления данных #}
-    <div class="data-actions">
-        <form action="{{ url_for('.load_initial_data') }}" method="post" style="display: inline;">
-            <button type="submit">Загрузить начальные данные (4 нед.)</button>
-        </form>
-        <form action="{{ url_for('.update_data') }}" method="post" style="display: inline;">
-            <button type="submit">Обновить данные (4 нед.)</button>
-        </form>
+    <div class="card">
+        <div class="card-header">
+            <h2 class="my-0">Список кампаний для {{ client_login }}</h2>
+        </div>
+        
+        {% if error_message %}
+            <div class="flash-message flash-danger">
+                <div><b>Ошибка:</b> {{ error_message }}</div>
+            </div>
+        {% endif %}
+        
+        <!-- Блок с информацией о данных и кнопками действий -->
+        <div class="data-info">
+            <div class="data-actions">
+                <form action="{{ url_for('.load_initial_data') }}" method="post" style="display: inline;">
+                    <button type="submit" class="button">
+                        <i class="icon icon-download"></i> Загрузить начальные данные (4 нед.)
+                    </button>
+                </form>
+                <form action="{{ url_for('.update_data') }}" method="post" style="display: inline;">
+                    <button type="submit" class="button button-secondary">
+                        <i class="icon icon-refresh"></i> Обновить данные (4 нед.)
+                    </button>
+                </form>
+            </div>
+            
+            <!-- Добавляем информацию о последнем обновлении (заглушка) -->
+            <p class="last-update-info">
+                <small>Последнее обновление данных: 
+                {% if last_update_time_str %}
+                    {{ last_update_time_str }}
+                {% else %}
+                    Нет данных
+                {% endif %}
+                </small>
+            </p>
+        </div>
+        
+        <!-- Улучшенная таблица кампаний -->
+        {% if campaigns %}
+            <div class="table-controls">
+                <div class="table-filters">
+                    <div class="table-search">
+                        <input type="text" id="campaign-search" placeholder="Поиск по названию">
+                    </div>
+                    <select id="campaign-filter">
+                        <option value="all">Все типы</option>
+                        <option value="TEXT_CAMPAIGN">Текстовые</option>
+                        <option value="PERFORMANCE_CAMPAIGN">Performance</option>
+                        <!-- Другие типы кампаний -->
+                    </select>
+                    <select id="campaign-status">
+                        <option value="all">Все статусы</option>
+                        <option value="ACCEPTED">Принятые</option>
+                        <option value="MODERATION">На модерации</option>
+                        <option value="DRAFT">Черновики</option>
+                        <!-- Другие статусы -->
+                    </select>
+                </div>
+            </div>
+            
+            <div class="table-container">
+                <table id="campaigns-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable" data-sort="name">Название кампании</th>
+                            <th class="sortable" data-sort="id">ID</th>
+                            <th class="sortable" data-sort="type">Тип</th>
+                            <th class="sortable" data-sort="status">Статус</th>
+                            <th class="sortable" data-sort="state">Состояние</th>
+                            <th>Статистика</th>
+                            <th>Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for campaign in campaigns %}
+                        <tr data-campaign-type="{{ campaign.Type }}" data-campaign-status="{{ campaign.Status }}">
+                            <td class="campaign-name">
+                                <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">
+                                    {{ campaign.Name }}
+                                </a>
+                            </td>
+                            <td>{{ campaign.Id }}</td>
+                            <td>
+                                {% if campaign.Type == 'TEXT_CAMPAIGN' %}
+                                    <span class="badge bg-info">Текстовая</span>
+                                {% elif campaign.Type == 'PERFORMANCE_CAMPAIGN' %}
+                                    <span class="badge bg-primary">Performance</span>
+                                {% else %}
+                                    <span class="badge">{{ campaign.Type }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if campaign.Status == 'ACCEPTED' %}
+                                    <span class="badge bg-success">Принята</span>
+                                {% elif campaign.Status == 'MODERATION' %}
+                                    <span class="badge bg-warning">На модерации</span>
+                                {% elif campaign.Status == 'DRAFT' %}
+                                    <span class="badge">Черновик</span>
+                                {% else %}
+                                    <span class="badge">{{ campaign.Status }}</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if campaign.State == 'ON' %}
+                                    <span class="badge bg-success">Включена</span>
+                                {% elif campaign.State == 'OFF' %}
+                                    <span class="badge">Выключена</span>
+                                {% elif campaign.State == 'SUSPENDED' %}
+                                    <span class="badge bg-warning">Приостановлена</span>
+                                {% else %}
+                                    <span class="badge">{{ campaign.State }}</span>
+                                {% endif %}
+                            </td>
+                            <td class="campaign-stats">
+                                <!-- Здесь можно добавить базовую статистику, если она доступна -->
+                                <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}" class="button button-small">
+                                    Смотреть статистику
+                                </a>
+                            </td>
+                            <td class="actions">
+                                <div class="dropdown">
+                                    <button class="button button-small">
+                                        Действия ▼
+                                    </button>
+                                    <div class="dropdown-content">
+                                        {# <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">Детальный просмотр</a> - Убираем, есть кнопка "Смотреть статистику" #}
+                                        <!-- Другие действия могут быть добавлены здесь -->
+                                    </div>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% elif not error_message %}
+            <div class="empty-state">
+                <p>Кампании не найдены.</p>
+                <p>Возможно, у вас еще нет кампаний в аккаунте, или они находятся в архиве.</p>
+            </div>
+        {% endif %}
     </div>
 
-    {% if error_message %}
-        <p style="color:red;">{{ error_message }}</p>
-    {% endif %}
-
-    {% if campaigns %}
-        <table>
-            <thead>
-                <tr>
-                    <th>Название Кампании</th>
-                    <th>ID</th>
-                    <th>Тип</th>
-                    <th>Статус</th>
-                    <th>Состояние</th>
-                    <th>Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for campaign in campaigns %}
-                <tr>
-                    <td>
-                        {# Добавляем ссылку на страницу детализации #}
-                        <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">{{ campaign.Name }}</a>
-                    </td>
-                    <td>{{ campaign.Id }}</td>
-                    <td>{{ campaign.Type }}</td>
-                    <td>{{ campaign.Status }}</td>
-                    <td>{{ campaign.State }}</td>
-                    <td>
-                        <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">Просмотр</a>
-                        {# Старая заглушка
-                        (Просмотр будет доступен позже) #}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    {% elif not error_message %}
-        <p>Кампании не найдены.</p>
-    {% endif %}
-
     <p><a href="{{ url_for('auth.index') }}">На главную</a></p>
+{% endblock %}
 
-{% endblock %} 
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Поиск по названию кампании
+    const campaignSearch = document.getElementById('campaign-search');
+    if (campaignSearch) {
+        campaignSearch.addEventListener('keyup', function() {
+            const searchValue = this.value.toLowerCase();
+            const rows = document.querySelectorAll('#campaigns-table tbody tr');
+            
+            rows.forEach(row => {
+                const campaignName = row.querySelector('.campaign-name').textContent.toLowerCase();
+                if (campaignName.includes(searchValue)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Фильтрация по типу кампании
+    const campaignFilter = document.getElementById('campaign-filter');
+    if (campaignFilter) {
+        campaignFilter.addEventListener('change', function() {
+            const filterValue = this.value;
+            const rows = document.querySelectorAll('#campaigns-table tbody tr');
+            
+            rows.forEach(row => {
+                if (filterValue === 'all' || row.getAttribute('data-campaign-type') === filterValue) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Фильтрация по статусу
+    const campaignStatus = document.getElementById('campaign-status');
+    if (campaignStatus) {
+        campaignStatus.addEventListener('change', function() {
+            const statusValue = this.value;
+            const rows = document.querySelectorAll('#campaigns-table tbody tr');
+            
+            rows.forEach(row => {
+                if (statusValue === 'all' || row.getAttribute('data-campaign-status') === statusValue) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+    }
+    
+    // Простая сортировка (для демонстрации)
+    const sortableHeaders = document.querySelectorAll('.sortable');
+    sortableHeaders.forEach(header => {
+        header.addEventListener('click', function() {
+            const table = document.getElementById('campaigns-table');
+            const sortBy = this.getAttribute('data-sort');
+            const rows = Array.from(table.querySelectorAll('tbody tr'));
+            
+            // Проверяем текущее направление сортировки
+            const isAscending = !this.classList.contains('sort-asc');
+            
+            // Сбрасываем все классы сортировки
+            sortableHeaders.forEach(h => {
+                h.classList.remove('sort-asc', 'sort-desc');
+            });
+            
+            // Устанавливаем новый класс сортировки
+            this.classList.add(isAscending ? 'sort-asc' : 'sort-desc');
+            
+            // Сортируем строки
+            rows.sort((a, b) => {
+                let aValue, bValue;
+                
+                if (sortBy === 'name') {
+                    aValue = a.querySelector('.campaign-name').textContent;
+                    bValue = b.querySelector('.campaign-name').textContent;
+                } else if (sortBy === 'id') {
+                    aValue = parseInt(a.cells[1].textContent);
+                    bValue = parseInt(b.cells[1].textContent);
+                } else {
+                    aValue = a.cells[Array.from(table.querySelector('thead tr').cells).findIndex(cell => cell.getAttribute('data-sort') === sortBy)].textContent;
+                    bValue = b.cells[Array.from(table.querySelector('thead tr').cells).findIndex(cell => cell.getAttribute('data-sort') === sortBy)].textContent;
+                }
+                
+                if (isAscending) {
+                    return aValue > bValue ? 1 : -1;
+                } else {
+                    return aValue < bValue ? 1 : -1;
+                }
+            });
+            
+            // Перестраиваем таблицу
+            const tbody = table.querySelector('tbody');
+            rows.forEach(row => tbody.appendChild(row));
+        });
+    });
+});
+</script>
+{% endblock %}

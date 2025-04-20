@@ -1,163 +1,454 @@
 {% extends 'base.html' %}
 
-{% block title %}Детали Кампании {{ campaign_name }} - CPC Auto Helper{% endblock %}
+{% block title %}{{ campaign_name }} (ID: {{ campaign_id }}) - CPC Auto Helper{% endblock %}
+
+{# --- Макрос для рендеринга пагинации --- #}
+{% macro render_pagination(pagination, endpoint, endpoint_args={}) %}
+    {% if pagination and pagination.pages > 1 %}
+        <nav aria-label="Page navigation" class="pagination">
+            <ul>
+                {# Ссылка на предыдущую страницу #}
+                <li {% if not pagination.has_prev %}class="disabled"{% endif %}>
+                    <a href="{% if pagination.has_prev %}{{ url_for(endpoint, page=pagination.prev_num, **endpoint_args) }}{% else %}#{% endif %}" 
+                       class="prev-page" aria-label="Previous">
+                        <span aria-hidden="true">« Назад</span>
+                    </a>
+                </li>
+                
+                {# Номера страниц #}
+                {% for page_num in pagination.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+                    {% if page_num %}
+                        <li {% if pagination.page == page_num %}class="active"{% endif %}>
+                            <a href="{{ url_for(endpoint, page=page_num, **endpoint_args) }}">{{ page_num }}</a>
+                        </li>
+                    {% else %}
+                        <li class="disabled"><span class="ellipsis">…</span></li>
+                    {% endif %}
+                {% endfor %}
+                
+                {# Ссылка на следующую страницу #}
+                <li {% if not pagination.has_next %}class="disabled"{% endif %}>
+                    <a href="{% if pagination.has_next %}{{ url_for(endpoint, page=pagination.next_num, **endpoint_args) }}{% else %}#{% endif %}" 
+                       class="next-page" aria-label="Next">
+                        <span aria-hidden="true">Вперед »</span>
+                    </a>
+                </li>
+            </ul>
+        </nav>
+    {% endif %}
+{% endmacro %}
+{# --- Конец макроса --- #}
 
 {% block content %}
-    <h2>Статистика Кампании: {{ campaign_name }} (ID: {{ campaign_id }})</h2>
-    <p><a href="{{ url_for('.campaigns') }}">Назад к списку кампаний</a></p>
+    <div class="card">
+        <div class="card-header">
+            <h2 class="my-0">{{ campaign_name }} <small class="text-light">(ID: {{ campaign_id }})</small></h2>
+            <div>
+                <a href="{{ url_for('.campaigns') }}" class="button button-small">← К списку кампаний</a>
+            </div>
+        </div>
 
-    {% if error_message %}
-        <p style="color:red;"><b>Ошибка при загрузке данных:</b> {{ error_message }}</p>
-    {% endif %}
+        {% if error_message %}
+            <div class="flash-message flash-danger">
+                <div><b>Ошибка при загрузке данных:</b> {{ error_message }}</div>
+            </div>
+        {% endif %}
 
-    {# --- Сводная статистика за весь период --- #}
-    <h3>Сводная статистика за {{ weeks_count }} нед. ({{ first_week_start.strftime('%d.%m.%y') if first_week_start else 'N/A' }} - {{ last_week_end.strftime('%d.%m.%y') if last_week_end else 'N/A' }})</h3>
-    {% if aggregated_stats %}
-        <ul>
-            <li>Всего показов: {{ aggregated_stats.get('total_impressions', 0) }}</li>
-            <li>Всего кликов: {{ aggregated_stats.get('total_clicks', 0) }}</li>
-            <li>Всего расход: {{ "%.2f"|format(aggregated_stats.get('total_cost', 0.0)) }}</li>
-            {# TODO: Добавить CTR, CPC? #}
-        </ul>
-    {% else %}
-        <p>Нет сводных данных за выбранный период.</p>
-    {% endif %}
+        <!-- Сводная статистика за весь период -->
+        <h3>Сводная статистика за {{ weeks_count }} нед. ({{ first_week_start.strftime('%d.%m.%y') if first_week_start else 'N/A' }} - {{ last_week_end.strftime('%d.%m.%y') if last_week_end else 'N/A' }})</h3>
+        
+        {% if aggregated_stats %}
+            <div class="metric-cards">
+                <div class="metric-card">
+                    <div class="metric-title">Показы</div>
+                    <div class="metric-value">{{ "{:,}".format(aggregated_stats.get('total_impressions', 0)).replace(',', ' ') }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Клики</div>
+                    <div class="metric-value">{{ "{:,}".format(aggregated_stats.get('total_clicks', 0)).replace(',', ' ') }}</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">CTR</div>
+                    <div class="metric-value">
+                        {% set ctr = (aggregated_stats.get('total_clicks', 0) / aggregated_stats.get('total_impressions', 1) * 100) if aggregated_stats.get('total_impressions', 0) > 0 else 0 %}
+                        {{ "%.2f"|format(ctr) }}%
+                    </div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Расход</div>
+                    <div class="metric-value">{{ "{:,.2f}".format(aggregated_stats.get('total_cost', 0.0)).replace(',', ' ') }} ₽</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">CPC</div>
+                    <div class="metric-value">
+                        {% set cpc = (aggregated_stats.get('total_cost', 0) / aggregated_stats.get('total_clicks', 1)) if aggregated_stats.get('total_clicks', 0) > 0 else 0 %}
+                        {{ "%.2f"|format(cpc) }} ₽
+                    </div>
+                </div>
+            </div>
+        {% else %}
+            <p>Нет сводных данных за выбранный период.</p>
+        {% endif %}
 
-    {# --- Детализация по неделям --- #}
-    <h2>Детализация по неделям</h2>
-    
-    {% if weekly_data %}
-        {# Итерируем по списку дат, чтобы сохранить порядок #}
-        {% for week_date in week_start_dates %}
-            {% set week_stats = weekly_data.get(week_date) %} {# Получаем данные за эту неделю #}
-            {% if week_stats %}
-                {# Выводим заголовок недели и ее суммарные показатели #}
-                <h4>Неделя {{ week_date.strftime('%d.%m.%Y') }}</h4>
-                {% set summary = week_stats.get('campaign_summary') %}
-                {% if summary %}
-                 <p>Показы: {{ summary.impressions }}, Клики: {{ summary.clicks }}, Расход: {{ "%.2f"|format(summary.cost) }}</p>
-                {% else %}
-                 <p>(Нет суммарных данных по кампании за эту неделю)</p>
-                {% endif %}
+        <!-- Вкладки для разных срезов данных -->
+        <div class="tabs">
+            <div class="tab active" data-tab="placements">Площадки</div>
+            <div class="tab" data-tab="queries">Поисковые запросы</div>
+            <div class="tab" data-tab="geo">География</div>
+            <div class="tab" data-tab="devices">Устройства</div>
+            <div class="tab" data-tab="demographics">Пол и возраст</div>
+        </div>
 
-                {# Площадки за неделю #}
-                <h5>Площадки</h5>
-                {% set placements = week_stats.get('placements') %}
-                {% if placements %}
-                    <table>
-                        <thead><tr><th>Площадка</th><th>Тип сети</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+        <!-- Содержимое вкладок -->
+        <div class="tab-content active" id="tab-placements">
+            <h4>Статистика по площадкам (всего {{ placements_pagination.total if placements_pagination else 0 }} записей)</h4>
+            
+            <div class="table-controls">
+                <div class="table-filters">
+                    <div class="table-search">
+                        <input type="text" id="placements-search" placeholder="Поиск по площадкам (на текущей стр.)">
+                    </div>
+                </div>
+                
+                <div>
+                    <button class="button button-small">Экспорт CSV (TODO)</button>
+                    <button class="button button-small button-secondary">Заблокировать выбранные (TODO)</button>
+                </div>
+            </div>
+            
+            {% if placements_pagination and placements_pagination.items %}
+                <div class="table-container">
+                    <table class="placements-table">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox" class="select-all"></th>
+                                <th class="sortable" data-sort="placement">Площадка</th>
+                                <th class="sortable" data-sort="adNetworkType">Тип сети</th>
+                                <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {% for stat in placements %}
+                            {% for stat in placements_pagination.items %}
                                 <tr>
+                                    <td><input type="checkbox" name="selected_placements" value="{{ stat.placement }}"></td>
                                     <td>{{ stat.placement if stat.placement else '(Не указана)' }}</td>
                                     <td>{{ stat.ad_network_type }}</td>
-                                    <td>{{ stat.impressions }}</td>
-                                    <td>{{ stat.clicks }}</td>
-                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
                                 </tr>
                             {% endfor %}
                         </tbody>
                     </table>
-                {% else %}
-                    <p>Нет данных по площадкам за эту неделю.</p>
-                {% endif %}
+                </div>
+                
+                {{ render_pagination(placements_pagination, '.view_campaign_detail', {'campaign_id': campaign_id}) }}
+                
+            {% else %}
+                <p>Нет данных по площадкам за выбранный период.</p>
+            {% endif %}
+        </div>
 
-                {# Поисковые запросы за неделю #}
-                <h5>Поисковые запросы</h5>
-                {% set queries = week_stats.get('queries') %}
-                {% if queries %}
-                    <table>
-                        <thead><tr><th>Запрос</th><th>ID Группы</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+        <!-- Вкладка Поисковые запросы -->
+        <div class="tab-content" id="tab-queries">
+            <h4>Статистика по поисковым запросам (всего {{ queries_pagination.total if queries_pagination else 0 }} записей)</h4>
+            
+             <div class="table-controls">
+                <div class="table-filters">
+                    <div class="table-search">
+                        <input type="text" id="queries-search" placeholder="Поиск по запросам (на текущей стр.)">
+                    </div>
+                </div>
+                
+                <div>
+                    <button class="button button-small">Экспорт CSV (TODO)</button>
+                    <button class="button button-small button-secondary">Добавить в минус-слова (TODO)</button>
+                </div>
+            </div>
+            
+            {% if queries_pagination and queries_pagination.items %}
+                 <div class="table-container">
+                    <table class="queries-table">
+                        <thead>
+                            <tr>
+                                <th><input type="checkbox" class="select-all"></th>
+                                <th class="sortable" data-sort="query">Запрос</th>
+                                <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {% for stat in queries %}
+                            {% for stat in queries_pagination.items %}
                                 <tr>
+                                    <td><input type="checkbox" name="selected_queries" value="{{ stat.query }}"></td>
                                     <td>{{ stat.query }}</td>
-                                    <td>{{ stat.ad_group_id }}</td>
-                                    <td>{{ stat.impressions }}</td>
-                                    <td>{{ stat.clicks }}</td>
-                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
                                 </tr>
                             {% endfor %}
                         </tbody>
                     </table>
-                {% else %}
-                    <p>Нет данных по поисковым запросам за эту неделю.</p>
-                {% endif %}
+                </div>
+                
+                {{ render_pagination(queries_pagination, '.view_campaign_detail', {'campaign_id': campaign_id}) }}
+                
+            {% else %}
+                 <p>Нет данных по поисковым запросам за выбранный период.</p>
+            {% endif %}
+        </div>
 
-                {# География за неделю #}
-                <h5>География</h5>
-                {% set geo_list = week_stats.get('geo') %}
-                {% if geo_list %}
-                    <table>
-                        <thead><tr><th>ID Региона</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
-                        <tbody>
-                            {% for stat in geo_list %}
+        <!-- Вкладка География -->
+        <div class="tab-content" id="tab-geo">
+             <h4>Статистика по географии</h4>
+             <div class="table-controls">
+                 {# Добавляем кнопку экспорта #}
+                 <div>
+                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                 </div>
+             </div>
+             {% if geo_stats %}
+                 <div class="table-container">
+                     <table class="geo-table">
+                         <thead>
+                            <tr>
+                                <th class="sortable numeric" data-sort="location">ID Региона</th>
+                                <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                            </tr>
+                         </thead>
+                         <tbody>
+                             {% for stat in geo_stats %}
                                 <tr>
-                                    <td>{{ stat.location_id }}</td>
-                                    <td>{{ stat.impressions }}</td>
-                                    <td>{{ stat.clicks }}</td>
-                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                    <td class="numeric">{{ stat.location_id }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
                                 </tr>
                             {% endfor %}
-                        </tbody>
-                    </table>
-                 {% else %}
-                    <p>Нет данных по географии за эту неделю.</p>
-                {% endif %}
+                         </tbody>
+                     </table>
+                 </div>
+             {% else %}
+                 <p>Нет данных по географии за выбранный период.</p>
+             {% endif %}
+        </div>
 
-                {# Устройства за неделю #}
-                <h5>Устройства</h5>
-                {% set devices = week_stats.get('devices') %}
-                {% if devices %}
-                    <table>
-                        <thead><tr><th>Тип устройства</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+        <!-- Вкладка Устройства -->
+        <div class="tab-content" id="tab-devices">
+            <h4>Статистика по устройствам</h4>
+            <div class="table-controls">
+                 {# Добавляем кнопку экспорта #}
+                 <div>
+                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                 </div>
+             </div>
+            {% if device_stats %}
+                <div class="table-container">
+                    <table class="devices-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="device">Тип устройства</th>
+                                <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {% for stat in devices %}
+                            {% for stat in device_stats %}
                                 <tr>
                                     <td>{{ stat.device_type }}</td>
-                                    <td>{{ stat.impressions }}</td>
-                                    <td>{{ stat.clicks }}</td>
-                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
                                 </tr>
                             {% endfor %}
                         </tbody>
                     </table>
-                {% else %}
-                    <p>Нет данных по устройствам за эту неделю.</p>
-                {% endif %}
+                </div>
+            {% else %}
+                <p>Нет данных по устройствам за выбранный период.</p>
+            {% endif %}
+        </div>
 
-                {# Демография за неделю #}
-                <h5>Пол и Возраст</h5>
-                {% set demographics = week_stats.get('demographics') %}
-                {% if demographics %}
-                     <table>
-                        <thead><tr><th>Пол</th><th>Возраст</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+        <!-- Вкладка Пол и возраст -->
+        <div class="tab-content" id="tab-demographics">
+            <h4>Статистика по полу и возрасту</h4>
+            <div class="table-controls">
+                 {# Добавляем кнопку экспорта #}
+                 <div>
+                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                 </div>
+             </div>
+            {% if demographic_stats %}
+                <div class="table-container">
+                    <table class="demographics-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="gender">Пол</th>
+                                <th class="sortable" data-sort="age">Возраст</th>
+                                <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                            </tr>
+                        </thead>
                         <tbody>
-                            {% for stat in demographics %}
+                             {% for stat in demographic_stats %}
                                 <tr>
                                     <td>{{ stat.gender }}</td>
                                     <td>{{ stat.age_group }}</td>
-                                    <td>{{ stat.impressions }}</td>
-                                    <td>{{ stat.clicks }}</td>
-                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
                                 </tr>
                             {% endfor %}
                         </tbody>
                     </table>
-                {% else %}
-                    <p>Нет данных по полу и возрасту за эту неделю.</p>
-                {% endif %}
+                </div>
             {% else %}
-                 {# Если для даты нет данных в weekly_data #}
-                 <h4>Неделя {{ week_date.strftime('%d.%m.%Y') }}</h4>
-                 <p>Нет данных за эту неделю.</p>
+                <p>Нет данных по полу и возрасту за выбранный период.</p>
             {% endif %}
-            <hr>
-        {% endfor %}
-    {% else %}
-        <p>Нет еженедельных данных для отображения.</p>
-    {% endif %}
+        </div>
 
-    {# TODO: Добавить форму для скачивания CSV (Подзадача 4.6) #}
+    </div> {# end card #}
+{% endblock %}
 
-{% endblock %} 
+{% block scripts %}
+<script>
+// Простой JavaScript для интерактивности элементов
+
+// Переключение вкладок
+document.addEventListener('DOMContentLoaded', function() {
+    // Обработчик для вкладок
+    const tabs = document.querySelectorAll('.tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', function() {
+            // Удаляем active со всех вкладок
+            tabs.forEach(t => t.classList.remove('active'));
+            
+            // Добавляем active к текущей вкладке
+            this.classList.add('active');
+            
+            // Скрываем все содержимое вкладок
+            const tabContents = document.querySelectorAll('.tab-content');
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            // Показываем содержимое текущей вкладки
+            const tabId = 'tab-' + this.getAttribute('data-tab');
+            document.getElementById(tabId).classList.add('active');
+        });
+    });
+    
+    // Простая пагинация (без реальной функциональности для демо)
+    const paginationLinks = document.querySelectorAll('.pagination a');
+    paginationLinks.forEach(link => {
+        link.addEventListener('click', function(e) {
+            e.preventDefault();
+            const pageItems = document.querySelectorAll('.pagination li');
+            pageItems.forEach(item => item.classList.remove('active'));
+            
+            // Если это не кнопки "Назад" и "Вперед"
+            if (!this.classList.contains('prev-page') && !this.classList.contains('next-page')) {
+                this.parentElement.classList.add('active');
+            }
+        });
+    });
+    
+    // Чекбоксы "Выбрать все"
+    const selectAllCheckboxes = document.querySelectorAll('.select-all');
+    selectAllCheckboxes.forEach(checkbox => {
+        checkbox.addEventListener('change', function() {
+            const table = this.closest('table');
+            const checkboxes = table.querySelectorAll('tbody input[type="checkbox"]');
+            checkboxes.forEach(cb => cb.checked = this.checked);
+        });
+    });
+    
+    // Простой поиск по таблице (для примера на площадках)
+    document.getElementById('placements-search').addEventListener('keyup', function() {
+        const searchValue = this.value.toLowerCase();
+        const placementsTable = this.closest('.tab-content').querySelector('.placements-table');
+        const rows = placementsTable.querySelectorAll('tbody tr');
+        
+        rows.forEach(row => {
+            const placementName = row.cells[2].textContent.toLowerCase();
+            if (placementName.includes(searchValue)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+    
+    // Аналогично для запросов
+    document.getElementById('queries-search').addEventListener('keyup', function() {
+        const searchValue = this.value.toLowerCase();
+        const queriesTable = this.closest('.tab-content').querySelector('.queries-table');
+        const rows = queriesTable.querySelectorAll('tbody tr');
+        
+        rows.forEach(row => {
+            const queryText = row.cells[1].textContent.toLowerCase();
+            if (queryText.includes(searchValue)) {
+                row.style.display = '';
+            } else {
+                row.style.display = 'none';
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

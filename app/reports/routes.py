@@ -1,8 +1,9 @@
 import requests
 import json
-from flask import redirect, url_for, session, flash, render_template
+from flask import redirect, url_for, session, flash, render_template, request
 from markupsafe import escape
 import traceback
+from datetime import datetime, timedelta
 
 from . import reports_bp
 from app.auth.utils import get_valid_token
@@ -17,6 +18,8 @@ from app.models import (
     WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
 )
 from sqlalchemy import func
+
+ROWS_PER_PAGE = 25 # Количество строк на странице для пагинации
 
 @reports_bp.route('/campaigns')
 def campaigns():
@@ -78,12 +81,21 @@ def campaigns():
         error_message = f"Непредвиденная ошибка при запросе кампаний: {e}"
         print(error_message)
 
+    # Вычисляем время "последнего обновления" (пока просто текущее время - 3 часа)
+    try:
+        # Используем UTC, так как now() в Jinja обычно UTC
+        last_update_time = datetime.utcnow() - timedelta(hours=3) 
+        last_update_time_str = last_update_time.strftime('%d.%m.%Y %H:%M')
+    except Exception:
+        last_update_time_str = "Ошибка времени"
+
     # Рендерим шаблон вместо генерации HTML
     return render_template(
         'reports/campaign_list.html', 
         campaigns=campaign_list, 
         client_login=client_login,
-        error_message=error_message
+        error_message=error_message,
+        last_update_time_str=last_update_time_str # Передаем строку в шаблон
     )
 
 @reports_bp.route('/campaign/<int:campaign_id>/platforms')
@@ -127,18 +139,27 @@ def view_campaign_detail(campaign_id):
 
     print(f"Запрос страницы деталей для campaign_id={campaign_id}, user={client_login}")
 
+    # Получаем номер страницы из GET-параметра, по умолчанию 1
+    page = request.args.get('page', 1, type=int)
+
     error_message = None
     campaign_name = f"Кампания {campaign_id}" # Имя пока не получаем
-    # Словарь для хранения данных по неделям
-    weekly_data = {} # { week_start_date: {'placement': [], 'query': [], ...} }
+    # Убираем еженедельную группировку, теперь данные агрегируются за весь период
+    # weekly_data = {} # { week_start_date: {'placement': [], 'query': [], ...} }
     aggregated_stats = {}
+    placements_pagination = None # Для пагинации площадок
+    queries_pagination = None # Для пагинации запросов
+    geo_stats = []
+    device_stats = []
+    demographic_stats = []
+    
     weeks_count = 4 
     first_week_start = None
     last_week_end = None
-    week_start_dates = [] # Сохраним список дат
+    week_start_dates = [] # Сохраним список дат для заголовка
 
     try:
-        # 1. Определить даты последних 4 недель
+        # 1. Определить даты последних 4 недель (оставляем для заголовка)
         week_start_dates = get_week_start_dates(weeks_count)
         if not week_start_dates:
             raise ValueError("Не удалось определить даты недель для отчета.")
@@ -146,18 +167,13 @@ def view_campaign_detail(campaign_id):
         first_week_start = week_start_dates[0]
         _, last_week_end = get_monday_and_sunday(week_start_dates[-1])
         
-        # Инициализируем словарь weekly_data ключами-датами
-        for week_date in week_start_dates:
-            weekly_data[week_date] = {
-                'placements': [], 'queries': [], 'geo': [], 
-                'devices': [], 'demographics': [], 'campaign_summary': {}
-            }
+        # Убрали инициализацию weekly_data
 
-        print(f"  Загрузка и группировка данных из БД за {weeks_count} нед: {week_start_dates}")
+        print(f"  Загрузка агрегированных данных из БД за {weeks_count} нед: {week_start_dates}")
 
         # 2. Запросы к локальной БД 
         
-        # Сводная статистика за весь период (оставляем агрегацию)
+        # Сводная статистика за весь период (оставляем)
         agg_result = db.session.query(
             func.sum(WeeklyCampaignStat.impressions).label('total_impressions'),
             func.sum(WeeklyCampaignStat.clicks).label('total_clicks'),
@@ -174,92 +190,70 @@ def view_campaign_detail(campaign_id):
                 'total_cost': agg_result.total_cost or 0.0
             }
 
-        # --- Загружаем и распределяем еженедельные данные --- 
+        # --- Загружаем данные по срезам за весь период --- 
         
-        # Общая статистика по кампании по неделям (для заголовка недели)
-        campaign_weekly_summary = db.session.query(WeeklyCampaignStat).filter(
-            WeeklyCampaignStat.yandex_login == client_login,
-            WeeklyCampaignStat.campaign_id == campaign_id,
-            WeeklyCampaignStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklyCampaignStat.week_start_date).all()
-        for stat in campaign_weekly_summary:
-            if stat.week_start_date in weekly_data:
-                weekly_data[stat.week_start_date]['campaign_summary'] = stat
-        
-        # Площадки
-        weekly_placement_stats = db.session.query(WeeklyPlacementStat).filter(
+        # Площадки - с пагинацией
+        placements_pagination = db.session.query(WeeklyPlacementStat).filter(
             WeeklyPlacementStat.yandex_login == client_login,
             WeeklyPlacementStat.campaign_id == campaign_id,
             WeeklyPlacementStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklyPlacementStat.week_start_date, WeeklyPlacementStat.cost.desc()).all()
-        for stat in weekly_placement_stats:
-             if stat.week_start_date in weekly_data:
-                 weekly_data[stat.week_start_date]['placements'].append(stat)
+        ).order_by(WeeklyPlacementStat.cost.desc()).paginate(page=page, per_page=ROWS_PER_PAGE, error_out=False)
 
-        # Запросы
-        weekly_query_stats = db.session.query(WeeklySearchQueryStat).filter(
+        # Запросы - с пагинацией
+        queries_pagination = db.session.query(WeeklySearchQueryStat).filter(
             WeeklySearchQueryStat.yandex_login == client_login,
             WeeklySearchQueryStat.campaign_id == campaign_id,
             WeeklySearchQueryStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklySearchQueryStat.week_start_date, WeeklySearchQueryStat.cost.desc()).limit(500).all()
-        for stat in weekly_query_stats:
-             if stat.week_start_date in weekly_data:
-                 weekly_data[stat.week_start_date]['queries'].append(stat)
+        ).order_by(WeeklySearchQueryStat.cost.desc()).paginate(page=page, per_page=ROWS_PER_PAGE, error_out=False)
 
-        # Гео
-        weekly_geo_stats = db.session.query(WeeklyGeoStat).filter(
+        # Гео - без пагинации (обычно немного данных)
+        geo_stats = db.session.query(WeeklyGeoStat).filter(
             WeeklyGeoStat.yandex_login == client_login,
             WeeklyGeoStat.campaign_id == campaign_id,
             WeeklyGeoStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklyGeoStat.week_start_date, WeeklyGeoStat.cost.desc()).all()
-        for stat in weekly_geo_stats:
-             if stat.week_start_date in weekly_data:
-                 weekly_data[stat.week_start_date]['geo'].append(stat)
+        ).order_by(WeeklyGeoStat.cost.desc()).all()
 
-        # Устройства
-        weekly_device_stats = db.session.query(WeeklyDeviceStat).filter(
+        # Устройства - без пагинации
+        device_stats = db.session.query(WeeklyDeviceStat).filter(
             WeeklyDeviceStat.yandex_login == client_login,
             WeeklyDeviceStat.campaign_id == campaign_id,
             WeeklyDeviceStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklyDeviceStat.week_start_date, WeeklyDeviceStat.cost.desc()).all()
-        for stat in weekly_device_stats:
-             if stat.week_start_date in weekly_data:
-                 weekly_data[stat.week_start_date]['devices'].append(stat)
+        ).order_by(WeeklyDeviceStat.cost.desc()).all()
 
-        # Демография
-        weekly_demographic_stats = db.session.query(WeeklyDemographicStat).filter(
+        # Демография - без пагинации
+        demographic_stats = db.session.query(WeeklyDemographicStat).filter(
             WeeklyDemographicStat.yandex_login == client_login,
             WeeklyDemographicStat.campaign_id == campaign_id,
             WeeklyDemographicStat.week_start_date.in_(week_start_dates)
-        ).order_by(WeeklyDemographicStat.week_start_date, WeeklyDemographicStat.cost.desc()).all()
-        for stat in weekly_demographic_stats:
-             if stat.week_start_date in weekly_data:
-                 weekly_data[stat.week_start_date]['demographics'].append(stat)
+        ).order_by(WeeklyDemographicStat.cost.desc()).all()
         
-        print(f"  Данные сгруппированы по неделям.")
+        # Убрали распределение по неделям
+        print(f"  Данные загружены.")
 
     except Exception as e_fetch:
         error_message = f"Ошибка при загрузке данных из локальной БД: {e_fetch}"
         print(f"  {error_message}")
         traceback.print_exc()
 
-    # Рендерим шаблон с данными, сгруппированными по неделям
+    # Рендерим шаблон с новыми данными
     return render_template(
         'reports/campaign_detail.html',
         campaign_id=campaign_id,
         campaign_name=campaign_name, 
-        weeks_count=weeks_count,
+        aggregated_stats=aggregated_stats,
+        placements_pagination=placements_pagination, # Передаем пагинацию площадок
+        queries_pagination=queries_pagination,       # Передаем пагинацию запросов
+        geo_stats=geo_stats,                         # Остальные данные передаем как списки
+        device_stats=device_stats,
+        demographic_stats=demographic_stats,
+        error_message=error_message,
+        weeks_count=weeks_count,                     # Для заголовка
         first_week_start=first_week_start,
         last_week_end=last_week_end,
-        aggregated_stats=aggregated_stats, # Общие итоги за весь период
-        # Передаем словарь с данными по неделям
-        # Ключи - даты, значения - словари со списками объектов
-        weekly_data=weekly_data,
-        week_start_dates=week_start_dates, # Передаем также отсортированный список дат
-        error_message=error_message
+        current_page=page                            # Передаем текущую страницу для пагинации
     )
 
-# --- Роуты для запуска сбора статистики --- 
+# --- Роуты для загрузки/обновления данных --- 
 
 @reports_bp.route('/load_initial_data', methods=['POST'])
 # TODO: В будущем добавить декоратор @login_required, если будет Flask-Login

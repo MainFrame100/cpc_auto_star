@@ -6,6 +6,9 @@
     <title>{% block title %}CPC Auto Helper{% endblock %}</title>
     {# Подключаем наш CSS файл из папки static #}
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono&display=swap" rel="stylesheet">
 </head>
 <body>
     <header>
@@ -43,6 +46,10 @@
     </footer>
 
     {# Опционально: подключение JS файлов в будущем #}
-    {# {% block scripts %}{% endblock %} #}
+    {% block scripts %}
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% endblock %}
+
+
 </body>
 </html> 
