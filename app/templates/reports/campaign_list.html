@@ -1,0 +1,60 @@
+{% extends 'base.html' %}
+
+{% block title %}Список кампаний - CPC Auto Helper{% endblock %}
+
+{% block content %}
+    <h2>Список Кампаний для {{ client_login }}</h2>
+
+    {# Кнопки для запуска сбора/обновления данных #}
+    <div class="data-actions">
+        <form action="{{ url_for('.load_initial_data') }}" method="post" style="display: inline;">
+            <button type="submit">Загрузить начальные данные (4 нед.)</button>
+        </form>
+        <form action="{{ url_for('.update_data') }}" method="post" style="display: inline;">
+            <button type="submit">Обновить данные (4 нед.)</button>
+        </form>
+    </div>
+
+    {% if error_message %}
+        <p style="color:red;">{{ error_message }}</p>
+    {% endif %}
+
+    {% if campaigns %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Название Кампании</th>
+                    <th>ID</th>
+                    <th>Тип</th>
+                    <th>Статус</th>
+                    <th>Состояние</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for campaign in campaigns %}
+                <tr>
+                    <td>
+                        {# Добавляем ссылку на страницу детализации #}
+                        <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">{{ campaign.Name }}</a>
+                    </td>
+                    <td>{{ campaign.Id }}</td>
+                    <td>{{ campaign.Type }}</td>
+                    <td>{{ campaign.Status }}</td>
+                    <td>{{ campaign.State }}</td>
+                    <td>
+                        <a href="{{ url_for('.view_campaign_detail', campaign_id=campaign.Id) }}">Просмотр</a>
+                        {# Старая заглушка
+                        (Просмотр будет доступен позже) #}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% elif not error_message %}
+        <p>Кампании не найдены.</p>
+    {% endif %}
+
+    <p><a href="{{ url_for('auth.index') }}">На главную</a></p>
+
+{% endblock %} 

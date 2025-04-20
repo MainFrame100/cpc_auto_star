@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import requests
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 
 # Добавляем корневую папку проекта в sys.path
@@ -13,6 +13,8 @@ sys.path.insert(0, project_root)
 from app import create_app, db
 from app.models import Token
 from app.auth.utils import get_valid_token # Импортируем функцию получения токена
+# Импортируем функции и константы для тестирования отчетов
+from app.reports.utils import fetch_report, get_week_start_dates, get_monday_and_sunday, FIELDS_PLACEMENT
 
 # Загружаем переменные окружения из .env файла
 load_dotenv(os.path.join(project_root, '.env'))
@@ -338,14 +340,67 @@ if __name__ == "__main__":
         if access_token:
             print("Токен успешно получен.")
 
-            # --- Включение кампаний (resume) ---
+            # --- Включение кампаний (resume) --- (Комментируем для чистоты теста)
             campaign_ids_to_resume = [482489, 482490, 482524, 482525, 482526] # Кампании OFF / ACCEPTED
-            if campaign_ids_to_resume:
-                print(f"Попытка включить кампании (resume): {campaign_ids_to_resume}...")
-                resume_existing_campaigns(access_token, SANDBOX_CLIENT_LOGIN, campaign_ids_to_resume)
-            else:
-                print("Нет ID кампаний для включения.")
+            # if campaign_ids_to_resume:
+            #     print(f"Попытка включить кампании (resume): {campaign_ids_to_resume}...")
+            #     resume_existing_campaigns(access_token, SANDBOX_CLIENT_LOGIN, campaign_ids_to_resume)
+            # else:
+            #     print("Нет ID кампаний для включения.")
             # -----------------------------------
+
+            # --- ТЕСТОВЫЙ ЗАПУСК fetch_report (Комментируем после завершения теста) --- 
+            # print("\n--- Запуск тестового запроса отчета --- ")
+            # # Выбираем ID кампании для теста (берем первый из списка resume)
+            # # !!! Убедись, что хотя бы один ID из списка ниже существует в твоей песочнице !!!
+            # test_campaign_ids = campaign_ids_to_resume[:1] 
+            # if test_campaign_ids:
+            #     print(f"Тестируем на кампаниях: {test_campaign_ids}")
+            #     try:
+            #         # Определяем даты для прошлой полной недели
+            #         past_week_starts = get_week_start_dates(1) 
+            #         if past_week_starts:
+            #             date_from = past_week_starts[0]
+            #             _, date_to = get_monday_and_sunday(date_from) # Получаем воскресенье той же недели
+            #             print(f"Период отчета: {date_from} - {date_to}")
+            # 
+            #             # Задаем поля и имя отчета
+            #             field_names_to_test = FIELDS_PLACEMENT
+            #             report_name = f"Test_Placement_{date_from.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M%S')}"
+            #             print(f"Запрашиваемые поля: {field_names_to_test}")
+            #             print(f"Имя отчета: {report_name}")
+            # 
+            #             # Вызываем функцию
+            #             parsed_data, raw_data, error_message = fetch_report(
+            #                 access_token=access_token,
+            #                 client_login=SANDBOX_CLIENT_LOGIN,
+            #                 campaign_ids=test_campaign_ids,
+            #                 date_from=date_from,
+            #                 date_to=date_to,
+            #                 field_names=field_names_to_test,
+            #                 report_name=report_name
+            #             )
+            # 
+            #             # Печатаем результат
+            #             if error_message:
+            #                 print(f"\nОШИБКА при получении отчета: {error_message}")
+            #             elif parsed_data is not None:
+            #                 print(f"\nУСПЕХ! Получено строк данных: {len(parsed_data)}")
+            #                 print("Первые 5 строк данных:")
+            #                 for i, row in enumerate(parsed_data[:5]):
+            #                     print(f"  {i+1}: {row}")
+            #             else:
+            #                 print("\nНеожиданный результат: нет ни данных, ни сообщения об ошибке.")
+            #         else:
+            #             print("Не удалось определить дату начала прошлой недели.")
+            #     
+            #     except Exception as e_test:
+            #         print(f"\nНепредвиденная ОШИБКА во время тестового запуска fetch_report: {e_test}")
+            # else:
+            #     print("Нет ID кампаний в списке campaign_ids_to_resume для запуска теста.")
+            # print("--- Тестовый запрос отчета завершен ---\n")
+            # --- КОНЕЦ ТЕСТОВОГО ЗАПУСКА --- 
+
 
             # --- Отправка существующих объявлений на модерацию (закомментировано) ---
             # campaign_ids_to_moderate = [482489, 482490, 482524, 482525, 482526] # Кампании в статусе DRAFT

@@ -1,0 +1,163 @@
+{% extends 'base.html' %}
+
+{% block title %}Детали Кампании {{ campaign_name }} - CPC Auto Helper{% endblock %}
+
+{% block content %}
+    <h2>Статистика Кампании: {{ campaign_name }} (ID: {{ campaign_id }})</h2>
+    <p><a href="{{ url_for('.campaigns') }}">Назад к списку кампаний</a></p>
+
+    {% if error_message %}
+        <p style="color:red;"><b>Ошибка при загрузке данных:</b> {{ error_message }}</p>
+    {% endif %}
+
+    {# --- Сводная статистика за весь период --- #}
+    <h3>Сводная статистика за {{ weeks_count }} нед. ({{ first_week_start.strftime('%d.%m.%y') if first_week_start else 'N/A' }} - {{ last_week_end.strftime('%d.%m.%y') if last_week_end else 'N/A' }})</h3>
+    {% if aggregated_stats %}
+        <ul>
+            <li>Всего показов: {{ aggregated_stats.get('total_impressions', 0) }}</li>
+            <li>Всего кликов: {{ aggregated_stats.get('total_clicks', 0) }}</li>
+            <li>Всего расход: {{ "%.2f"|format(aggregated_stats.get('total_cost', 0.0)) }}</li>
+            {# TODO: Добавить CTR, CPC? #}
+        </ul>
+    {% else %}
+        <p>Нет сводных данных за выбранный период.</p>
+    {% endif %}
+
+    {# --- Детализация по неделям --- #}
+    <h2>Детализация по неделям</h2>
+    
+    {% if weekly_data %}
+        {# Итерируем по списку дат, чтобы сохранить порядок #}
+        {% for week_date in week_start_dates %}
+            {% set week_stats = weekly_data.get(week_date) %} {# Получаем данные за эту неделю #}
+            {% if week_stats %}
+                {# Выводим заголовок недели и ее суммарные показатели #}
+                <h4>Неделя {{ week_date.strftime('%d.%m.%Y') }}</h4>
+                {% set summary = week_stats.get('campaign_summary') %}
+                {% if summary %}
+                 <p>Показы: {{ summary.impressions }}, Клики: {{ summary.clicks }}, Расход: {{ "%.2f"|format(summary.cost) }}</p>
+                {% else %}
+                 <p>(Нет суммарных данных по кампании за эту неделю)</p>
+                {% endif %}
+
+                {# Площадки за неделю #}
+                <h5>Площадки</h5>
+                {% set placements = week_stats.get('placements') %}
+                {% if placements %}
+                    <table>
+                        <thead><tr><th>Площадка</th><th>Тип сети</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+                        <tbody>
+                            {% for stat in placements %}
+                                <tr>
+                                    <td>{{ stat.placement if stat.placement else '(Не указана)' }}</td>
+                                    <td>{{ stat.ad_network_type }}</td>
+                                    <td>{{ stat.impressions }}</td>
+                                    <td>{{ stat.clicks }}</td>
+                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>Нет данных по площадкам за эту неделю.</p>
+                {% endif %}
+
+                {# Поисковые запросы за неделю #}
+                <h5>Поисковые запросы</h5>
+                {% set queries = week_stats.get('queries') %}
+                {% if queries %}
+                    <table>
+                        <thead><tr><th>Запрос</th><th>ID Группы</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+                        <tbody>
+                            {% for stat in queries %}
+                                <tr>
+                                    <td>{{ stat.query }}</td>
+                                    <td>{{ stat.ad_group_id }}</td>
+                                    <td>{{ stat.impressions }}</td>
+                                    <td>{{ stat.clicks }}</td>
+                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>Нет данных по поисковым запросам за эту неделю.</p>
+                {% endif %}
+
+                {# География за неделю #}
+                <h5>География</h5>
+                {% set geo_list = week_stats.get('geo') %}
+                {% if geo_list %}
+                    <table>
+                        <thead><tr><th>ID Региона</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+                        <tbody>
+                            {% for stat in geo_list %}
+                                <tr>
+                                    <td>{{ stat.location_id }}</td>
+                                    <td>{{ stat.impressions }}</td>
+                                    <td>{{ stat.clicks }}</td>
+                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                 {% else %}
+                    <p>Нет данных по географии за эту неделю.</p>
+                {% endif %}
+
+                {# Устройства за неделю #}
+                <h5>Устройства</h5>
+                {% set devices = week_stats.get('devices') %}
+                {% if devices %}
+                    <table>
+                        <thead><tr><th>Тип устройства</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+                        <tbody>
+                            {% for stat in devices %}
+                                <tr>
+                                    <td>{{ stat.device_type }}</td>
+                                    <td>{{ stat.impressions }}</td>
+                                    <td>{{ stat.clicks }}</td>
+                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>Нет данных по устройствам за эту неделю.</p>
+                {% endif %}
+
+                {# Демография за неделю #}
+                <h5>Пол и Возраст</h5>
+                {% set demographics = week_stats.get('demographics') %}
+                {% if demographics %}
+                     <table>
+                        <thead><tr><th>Пол</th><th>Возраст</th><th>Показы</th><th>Клики</th><th>Расход</th></tr></thead>
+                        <tbody>
+                            {% for stat in demographics %}
+                                <tr>
+                                    <td>{{ stat.gender }}</td>
+                                    <td>{{ stat.age_group }}</td>
+                                    <td>{{ stat.impressions }}</td>
+                                    <td>{{ stat.clicks }}</td>
+                                    <td>{{ "%.2f"|format(stat.cost) }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                {% else %}
+                    <p>Нет данных по полу и возрасту за эту неделю.</p>
+                {% endif %}
+            {% else %}
+                 {# Если для даты нет данных в weekly_data #}
+                 <h4>Неделя {{ week_date.strftime('%d.%m.%Y') }}</h4>
+                 <p>Нет данных за эту неделю.</p>
+            {% endif %}
+            <hr>
+        {% endfor %}
+    {% else %}
+        <p>Нет еженедельных данных для отображения.</p>
+    {% endif %}
+
+    {# TODO: Добавить форму для скачивания CSV (Подзадача 4.6) #}
+
+{% endblock %} 

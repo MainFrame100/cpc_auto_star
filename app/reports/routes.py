@@ -1,23 +1,35 @@
 import requests
 import json
-from flask import redirect, url_for, session
+from flask import redirect, url_for, session, flash, render_template
 from markupsafe import escape
+import traceback
 
 from . import reports_bp
 from app.auth.utils import get_valid_token
 from app.auth.routes import DIRECT_API_SANDBOX_URL
-from .utils import fetch_placement_report
+from .utils import (
+    fetch_report, FIELDS_PLACEMENT, get_monday_and_sunday, get_week_start_dates,
+    collect_weekly_stats_for_last_n_weeks
+)
+from app import db
+from app.models import (
+    Token, WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat, 
+    WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
+)
+from sqlalchemy import func
 
 @reports_bp.route('/campaigns')
 def campaigns():
     """Отображает список кампаний пользователя."""
     client_login = session.get('yandex_client_login')
     if not client_login:
-        return redirect(url_for('auth.index', message="Пожалуйста, войдите для просмотра кампаний."))
+        flash("Пожалуйста, войдите для просмотра кампаний.", "warning")
+        return redirect(url_for('auth.index'))
 
     access_token = get_valid_token(client_login)
     if not access_token:
-        return redirect(url_for('auth.index', message="Ошибка токена. Пожалуйста, войдите снова."))
+        flash("Ошибка токена. Пожалуйста, войдите снова.", "danger")
+        return redirect(url_for('auth.index'))
 
     # --- Запрос к API для получения списка кампаний --- 
     headers = {
@@ -66,118 +78,227 @@ def campaigns():
         error_message = f"Непредвиденная ошибка при запросе кампаний: {e}"
         print(error_message)
 
-    # --- Генерация HTML --- 
-    html_body = f"<h1>Список Кампаний для {escape(client_login)}</h1>"
-    html_body += f"<p><a href=\"{url_for('auth.index')}\">На главную</a></p>"
-
-    if error_message:
-        html_body += f'<p style="color:red;">{escape(error_message)}</p>'
-
-    if campaign_list:
-        html_body += "<ul>"
-        for campaign in campaign_list:
-            campaign_id = campaign.get('Id')
-            campaign_name = campaign.get('Name', 'Без имени')
-            campaign_state = campaign.get('State', 'N/A')
-            campaign_status = campaign.get('Status', 'N/A')
-            campaign_type = campaign.get('Type', 'N/A')
-            
-            # Генерируем ссылку на будущий роут отчета по площадкам
-            # Эндпоинт 'reports.platforms_report' будет создан позже
-            try:
-                platforms_link = url_for('reports.platforms_report', campaign_id=campaign_id)
-                link_html = f'<a href="{platforms_link}">Отчет по площадкам</a>'
-            except Exception as e_url:
-                # Обработка на случай, если эндпоинт еще не определен (хотя он должен быть в этом же блюпринте)
-                print(f"Ошибка генерации URL для platforms_report (campaign_id={campaign_id}): {e_url}")
-                link_html = "(Не удалось создать ссылку на отчет)"
-
-            html_body += (
-                f"<li>"
-                f"<b>{escape(campaign_name)}</b> (ID: {campaign_id}) - {escape(campaign_state)} / {escape(campaign_status)} ({escape(campaign_type)}) | "
-                f"{link_html}"
-                f"</li>"
-            )
-        html_body += "</ul>"
-    elif not error_message:
-        html_body += "<p>Кампании не найдены.</p>"
-
-    return html_body 
+    # Рендерим шаблон вместо генерации HTML
+    return render_template(
+        'reports/campaign_list.html', 
+        campaigns=campaign_list, 
+        client_login=client_login,
+        error_message=error_message
+    )
 
 @reports_bp.route('/campaign/<int:campaign_id>/platforms')
 def platforms_report(campaign_id):
-    """Отображает отчет по площадкам для указанной кампании."""
+    """Отображает отчет по площадкам для указанной кампании (ЗАГЛУШКА)."""
     client_login = session.get('yandex_client_login')
     if not client_login:
-        return redirect(url_for('auth.index', message="Пожалуйста, войдите для просмотра отчета."))
+        flash("Пожалуйста, войдите для просмотра отчета.", "warning")
+        return redirect(url_for('auth.index'))
 
+    # Токен пока не нужен для заглушки, но оставим проверку
     access_token = get_valid_token(client_login)
     if not access_token:
-        return redirect(url_for('auth.index', message="Ошибка токена. Пожалуйста, войдите снова."))
+        flash("Ошибка токена. Пожалуйста, войдите снова.", "danger")
+        return redirect(url_for('auth.index'))
 
-    print(f"Запрос отчета по площадкам для campaign_id={campaign_id}")
-    # Получаем теперь 3 значения
-    report_data_parsed, report_data_raw, error_message = fetch_placement_report(access_token, client_login, campaign_id)
+    print(f"Запрос страницы отчета по площадкам (заглушка) для campaign_id={campaign_id}")
 
-    # --- Генерация HTML --- 
-    html_body = f"<h1>Отчет по площадкам для кампании {campaign_id}</h1>"
-    html_body += f"<p><a href=\"{url_for('reports.campaigns')}\">Назад к списку кампаний</a> | <a href=\"{url_for('auth.index')}\">На главную</a></p>"
-
-    if error_message:
-        html_body += f'<p style="color:red;"><b>Ошибка при получении/обработке отчета:</b> {escape(error_message)}</p>'
+    # --- ВРЕМЕННАЯ ЗАГЛУШКА --- 
+    # В этой версии мы не запрашиваем отчет, а просто рендерим шаблон-заглушку.
+    # Логика запроса отчета удалена.
+    error_message = None # Можно передать сообщение об ошибке, если оно возникло где-то раньше
     
-    # Отображаем распарсенную таблицу, если она есть
-    if report_data_parsed:
-        html_body += "<h3>Результаты отчета:</h3>"
-        html_body += "<table border='1' style='border-collapse: collapse; width: 80%;'>"
-        html_body += "<thead><tr>"
-        
-        # Словарь для перевода заголовков
-        COLUMN_NAMES_RU = {
-            'Placement': 'Площадка',
-            'Impressions': 'Показы',
-            'Clicks': 'Клики',
-            'Cost': 'Расход (руб.)',
-            'BounceRate': 'Отказы (%)'
-            # Добавить переводы для других полей, если они будут добавляться
-        }
+    return render_template(
+        'reports/platforms_report_stub.html',
+        campaign_id=campaign_id,
+        error_message=error_message 
+    )
+    # --- КОНЕЦ ВРЕМЕННОЙ ЗАГЛУШКИ ---
 
-        # Генерируем заголовки таблицы из ключей первого словаря (если данные есть)
-        headers_in_order = [] # Сохраним порядок ключей
-        if report_data_parsed:
-            headers_in_order = list(report_data_parsed[0].keys())
-            for header_key in headers_in_order:
-                # Берем русское название из словаря, или оставляем ключ если перевода нет
-                header_ru = COLUMN_NAMES_RU.get(header_key, header_key)
-                html_body += f"<th>{escape(header_ru)}</th>"
-        html_body += "</tr></thead>"
-        
-        html_body += "<tbody>"
-        for row_dict in report_data_parsed:
-            html_body += "<tr>"
-            # Используем сохраненный порядок заголовков (headers_in_order)
-            for header_key in headers_in_order: 
-                value = row_dict.get(header_key, 'N/A')
-                # Форматируем числа для лучшей читаемости
-                if isinstance(value, float):
-                    # Расход форматируем как валюту, отказы - как проценты
-                    if header_key == 'Cost':
-                         value_str = f"{value:.2f}" # 2 знака после запятой
-                    elif header_key == 'BounceRate':
-                         value_str = f"{value:.2f}%" # Добавляем знак процента
-                    else:
-                         value_str = f"{value:.2f}"
-                elif header_key == 'Placement' and not value:
-                    value_str = "(Не указана)"
-                else:
-                    value_str = str(value) # Остальное как строка
-                # Выравнивание числовых столбцов по правому краю для лучшей читаемости
-                td_style = "style='text-align: right;'" if header_key not in ['Placement'] else ""
-                html_body += f"<td {td_style}>{escape(value_str)}</td>"
-            html_body += "</tr>"
-        html_body += "</tbody>"
-        html_body += "</table>"
-    elif not error_message: # Если нет ошибки и нет распарсенных данных
-        html_body += "<p>Нет данных по площадкам для этой кампании за выбранный период (после парсинга).</p>"
+# --- Роут для просмотра детальной статистики кампании --- 
 
-    return html_body 
+@reports_bp.route('/campaign/<int:campaign_id>/view')
+# TODO: Добавить @login_required
+def view_campaign_detail(campaign_id):
+    """Отображает детальную статистику по кампании из локальной БД."""
+    client_login = session.get('yandex_client_login')
+    if not client_login:
+        flash("Пожалуйста, войдите для просмотра деталей кампании.", "warning")
+        return redirect(url_for('auth.index'))
+
+    print(f"Запрос страницы деталей для campaign_id={campaign_id}, user={client_login}")
+
+    error_message = None
+    campaign_name = f"Кампания {campaign_id}" # Имя пока не получаем
+    # Словарь для хранения данных по неделям
+    weekly_data = {} # { week_start_date: {'placement': [], 'query': [], ...} }
+    aggregated_stats = {}
+    weeks_count = 4 
+    first_week_start = None
+    last_week_end = None
+    week_start_dates = [] # Сохраним список дат
+
+    try:
+        # 1. Определить даты последних 4 недель
+        week_start_dates = get_week_start_dates(weeks_count)
+        if not week_start_dates:
+            raise ValueError("Не удалось определить даты недель для отчета.")
+        
+        first_week_start = week_start_dates[0]
+        _, last_week_end = get_monday_and_sunday(week_start_dates[-1])
+        
+        # Инициализируем словарь weekly_data ключами-датами
+        for week_date in week_start_dates:
+            weekly_data[week_date] = {
+                'placements': [], 'queries': [], 'geo': [], 
+                'devices': [], 'demographics': [], 'campaign_summary': {}
+            }
+
+        print(f"  Загрузка и группировка данных из БД за {weeks_count} нед: {week_start_dates}")
+
+        # 2. Запросы к локальной БД 
+        
+        # Сводная статистика за весь период (оставляем агрегацию)
+        agg_result = db.session.query(
+            func.sum(WeeklyCampaignStat.impressions).label('total_impressions'),
+            func.sum(WeeklyCampaignStat.clicks).label('total_clicks'),
+            func.sum(WeeklyCampaignStat.cost).label('total_cost')
+        ).filter(
+            WeeklyCampaignStat.yandex_login == client_login,
+            WeeklyCampaignStat.campaign_id == campaign_id,
+            WeeklyCampaignStat.week_start_date.in_(week_start_dates)
+        ).first()
+        if agg_result:
+            aggregated_stats = {
+                'total_impressions': agg_result.total_impressions or 0,
+                'total_clicks': agg_result.total_clicks or 0,
+                'total_cost': agg_result.total_cost or 0.0
+            }
+
+        # --- Загружаем и распределяем еженедельные данные --- 
+        
+        # Общая статистика по кампании по неделям (для заголовка недели)
+        campaign_weekly_summary = db.session.query(WeeklyCampaignStat).filter(
+            WeeklyCampaignStat.yandex_login == client_login,
+            WeeklyCampaignStat.campaign_id == campaign_id,
+            WeeklyCampaignStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklyCampaignStat.week_start_date).all()
+        for stat in campaign_weekly_summary:
+            if stat.week_start_date in weekly_data:
+                weekly_data[stat.week_start_date]['campaign_summary'] = stat
+        
+        # Площадки
+        weekly_placement_stats = db.session.query(WeeklyPlacementStat).filter(
+            WeeklyPlacementStat.yandex_login == client_login,
+            WeeklyPlacementStat.campaign_id == campaign_id,
+            WeeklyPlacementStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklyPlacementStat.week_start_date, WeeklyPlacementStat.cost.desc()).all()
+        for stat in weekly_placement_stats:
+             if stat.week_start_date in weekly_data:
+                 weekly_data[stat.week_start_date]['placements'].append(stat)
+
+        # Запросы
+        weekly_query_stats = db.session.query(WeeklySearchQueryStat).filter(
+            WeeklySearchQueryStat.yandex_login == client_login,
+            WeeklySearchQueryStat.campaign_id == campaign_id,
+            WeeklySearchQueryStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklySearchQueryStat.week_start_date, WeeklySearchQueryStat.cost.desc()).limit(500).all()
+        for stat in weekly_query_stats:
+             if stat.week_start_date in weekly_data:
+                 weekly_data[stat.week_start_date]['queries'].append(stat)
+
+        # Гео
+        weekly_geo_stats = db.session.query(WeeklyGeoStat).filter(
+            WeeklyGeoStat.yandex_login == client_login,
+            WeeklyGeoStat.campaign_id == campaign_id,
+            WeeklyGeoStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklyGeoStat.week_start_date, WeeklyGeoStat.cost.desc()).all()
+        for stat in weekly_geo_stats:
+             if stat.week_start_date in weekly_data:
+                 weekly_data[stat.week_start_date]['geo'].append(stat)
+
+        # Устройства
+        weekly_device_stats = db.session.query(WeeklyDeviceStat).filter(
+            WeeklyDeviceStat.yandex_login == client_login,
+            WeeklyDeviceStat.campaign_id == campaign_id,
+            WeeklyDeviceStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklyDeviceStat.week_start_date, WeeklyDeviceStat.cost.desc()).all()
+        for stat in weekly_device_stats:
+             if stat.week_start_date in weekly_data:
+                 weekly_data[stat.week_start_date]['devices'].append(stat)
+
+        # Демография
+        weekly_demographic_stats = db.session.query(WeeklyDemographicStat).filter(
+            WeeklyDemographicStat.yandex_login == client_login,
+            WeeklyDemographicStat.campaign_id == campaign_id,
+            WeeklyDemographicStat.week_start_date.in_(week_start_dates)
+        ).order_by(WeeklyDemographicStat.week_start_date, WeeklyDemographicStat.cost.desc()).all()
+        for stat in weekly_demographic_stats:
+             if stat.week_start_date in weekly_data:
+                 weekly_data[stat.week_start_date]['demographics'].append(stat)
+        
+        print(f"  Данные сгруппированы по неделям.")
+
+    except Exception as e_fetch:
+        error_message = f"Ошибка при загрузке данных из локальной БД: {e_fetch}"
+        print(f"  {error_message}")
+        traceback.print_exc()
+
+    # Рендерим шаблон с данными, сгруппированными по неделям
+    return render_template(
+        'reports/campaign_detail.html',
+        campaign_id=campaign_id,
+        campaign_name=campaign_name, 
+        weeks_count=weeks_count,
+        first_week_start=first_week_start,
+        last_week_end=last_week_end,
+        aggregated_stats=aggregated_stats, # Общие итоги за весь период
+        # Передаем словарь с данными по неделям
+        # Ключи - даты, значения - словари со списками объектов
+        weekly_data=weekly_data,
+        week_start_dates=week_start_dates, # Передаем также отсортированный список дат
+        error_message=error_message
+    )
+
+# --- Роуты для запуска сбора статистики --- 
+
+@reports_bp.route('/load_initial_data', methods=['POST'])
+# TODO: В будущем добавить декоратор @login_required, если будет Flask-Login
+def load_initial_data():
+    """Запускает первоначальный сбор статистики за последние N недель (для теста N=1)."""
+    client_login = session.get('yandex_client_login')
+    if not client_login:
+        flash("Пожалуйста, войдите в систему для запуска сбора данных.", "warning")
+        return redirect(url_for('auth.index'))
+    
+    print(f"Запуск load_initial_data для пользователя {client_login}...")
+    # Вызываем основную функцию сбора, ДЛЯ ТЕСТА ставим n_weeks=1
+    success, message = collect_weekly_stats_for_last_n_weeks(yandex_login=client_login, n_weeks=1)
+    
+    if success:
+        flash(f"Сбор данных запущен/завершен: {message}", "success")
+    else:
+        flash(f"Ошибка при сборе данных: {message}", "danger")
+        
+    # Перенаправляем обратно на страницу кампаний (пока что)
+    # TODO: Возможно, лучше перенаправлять на отдельную страницу статуса или дашборд
+    return redirect(url_for('.campaigns')) # '.' означает текущий блюпринт
+
+@reports_bp.route('/update_data', methods=['POST'])
+# TODO: В будущем добавить декоратор @login_required
+def update_data():
+    """Запускает обновление статистики за последние N недель (для теста N=1)."""
+    client_login = session.get('yandex_client_login')
+    if not client_login:
+        flash("Пожалуйста, войдите в систему для запуска обновления данных.", "warning")
+        return redirect(url_for('auth.index'))
+        
+    print(f"Запуск update_data для пользователя {client_login}...")
+    # Для MVP обновление делает то же самое, ДЛЯ ТЕСТА ставим n_weeks=1
+    success, message = collect_weekly_stats_for_last_n_weeks(yandex_login=client_login, n_weeks=1)
+    
+    if success:
+        flash(f"Обновление данных запущено/завершено: {message}", "success")
+    else:
+        flash(f"Ошибка при обновлении данных: {message}", "danger")
+        
+    return redirect(url_for('.campaigns'))

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}CPC Auto Helper{% endblock %}</title>
+    {# Подключаем наш CSS файл из папки static #}
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <header>
+        <h1><a href="{{ url_for('auth.index') }}">CPC Auto Helper</a></h1>
+        <nav>
+            {# Здесь можно добавить ссылки навигации в будущем #}
+            {% if session.get('yandex_client_login') %}
+                <span>Пользователь: {{ session['yandex_client_login'] }}</span> | 
+                <a href="{{ url_for('auth.logout') }}">Выйти</a>
+            {% else %}
+                <a href="{{ url_for('auth.login') }}">Войти через Яндекс</a>
+            {% endif %}
+        </nav>
+    </header>
+
+    <main>
+        {# Блок для отображения flash-сообщений #}
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                <div class="flash-messages">
+                {% for category, message in messages %}
+                    <div class="flash-message flash-{{ category }}">{{ message }}</div>
+                {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+
+        {# Основной контент страницы #}
+        {% block content %}
+        {% endblock %}
+    </main>
+
+    <footer>
+        <p>&copy; {{ now().year }} CPC Auto Helper MVP</p>
+    </footer>
+
+    {# Опционально: подключение JS файлов в будущем #}
+    {# {% block scripts %}{% endblock %} #}
+</body>
+</html> 

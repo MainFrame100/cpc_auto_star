@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+
+{% block title %}Успешная авторизация - CPC Auto Helper{% endblock %}
+
+{% block content %}
+    <h2>Авторизация прошла успешно!</h2>
+    <p>Вы успешно авторизовались через Яндекс как <strong>{{ client_login }}</strong>.</p>
+    <p>Токен доступа сохранен и будет использоваться для запросов к API Яндекс.Директ.</p>
+    <p><a href="{{ url_for('reports.campaigns') }}" class="button">Перейти к списку кампаний</a></p>
+    <p><a href="{{ url_for('auth.index') }}">На главную</a></p>
+{% endblock %} 

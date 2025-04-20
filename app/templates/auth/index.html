@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+
+{% block title %}Главная - CPC Auto Helper{% endblock %}
+
+{% block content %}
+    <h2>Добро пожаловать в CPC Auto Helper!</h2>
+    
+    {% if session.get('yandex_client_login') %}
+        <p>Вы вошли как: <strong>{{ session['yandex_client_login'] }}</strong></p>
+        <p><a href="{{ url_for('reports.campaigns') }}" class="button">Перейти к списку кампаний</a></p>
+        <p><a href="{{ url_for('auth.logout') }}">Выйти</a></p>
+    {% else %}
+        <p>Это инструмент для автоматизации работы с Яндекс.Директ.</p>
+        <p>Для начала работы, пожалуйста, войдите через ваш аккаунт Яндекс.</p>
+        <p><a href="{{ url_for('auth.login') }}" class="button">Войти через Яндекс</a></p>
+    {% endif %}
+
+    {# Отображение сообщений, переданных при редиректе #}
+    {% if message %}
+        <p style="color: blue;">{{ message }}</p>
+    {% endif %}
+{% endblock %} 

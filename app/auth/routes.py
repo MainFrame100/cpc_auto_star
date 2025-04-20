@@ -1,7 +1,7 @@
 import os
 import requests
 import json # Оставляем, может пригодиться для API
-from flask import redirect, request, url_for, session, current_app # Добавляем current_app
+from flask import redirect, request, url_for, session, current_app, flash, render_template # Добавляем current_app, flash, render_template
 from datetime import datetime, timedelta
 from urllib.parse import urlencode # Для формирования URL
 
@@ -18,43 +18,15 @@ DIRECT_API_SANDBOX_URL = 'https://api-sandbox.direct.yandex.com/json/v5/'
 
 @auth_bp.route('/')
 def index():
-    """
-    Главная страница. Отображает ссылку для входа и сообщения.
-    """
-    message = request.args.get('message')
-    # Используем префикс 'auth.' для url_for
-    login_link = f'<a href="{url_for('auth.login_yandex')}">Войти через Яндекс</a>'
-    status_html = ""
-    logout_link = ""
-    test_api_link = ""
+    """Главная страница аутентификации."""
+    # Получаем сообщение из GET параметра (если есть)
+    message = request.args.get('message') 
+    # Рендерим шаблон вместо возврата строки
+    return render_template('auth/index.html', message=message)
 
-    client_login = session.get('yandex_client_login')
-    if client_login:
-        token_entry = Token.query.filter_by(yandex_login=client_login).first()
-        if token_entry:
-            status_html = f"<p>Вы вошли как: {client_login}.</p>"
-            # Ссылка на тест API пока убрана, будет в другом Blueprint
-            test_api_link = f"<a href='{url_for('reports.campaigns')}'>Список кампаний</a> | "
-            logout_link = f"<a href='{url_for('auth.logout')}'>Выйти</a>"
-            login_link = "" # Убираем ссылку на вход, если уже вошли
-        else:
-            session.pop('yandex_client_login', None)
-            status_html = "<p>Ошибка: Найден логин в сессии, но нет токена в БД. Сессия очищена.</p>"
-
-    return f"""
-    <h1>CPC Auto Helper - Вход</h1>
-    { f'<p style="color:blue;">{message}</p>' if message else '' }
-    { status_html }
-    { test_api_link } 
-    { logout_link }
-    { login_link }
-    """
-
-@auth_bp.route('/login/yandex')
-def login_yandex():
-    """
-    Перенаправляет пользователя на страницу авторизации Яндекса.
-    """
+@auth_bp.route('/login')
+def login():
+    """Перенаправляет пользователя на страницу авторизации Яндекса."""
     if not YANDEX_CLIENT_ID:
         # Можно использовать flash для сообщений об ошибках
         return "Ошибка: YANDEX_CLIENT_ID не найден в .env файле.", 500
@@ -73,24 +45,22 @@ def login_yandex():
         # 'state': os.urandom(16).hex() # Хорошая практика добавить state
     }
     auth_url = f"https://oauth.yandex.ru/authorize?{urlencode(params)}"
+    print(f"Redirecting to Yandex OAuth: {auth_url}") # Логируем URL
     return redirect(auth_url)
 
-@auth_bp.route('/oauth/callback')
+@auth_bp.route('/oauth-callback')
 def oauth_callback():
-    """
-    Обрабатывает ответ от сервера авторизации Яндекса.
-    Обменивает code на токен.
-    """
+    """Обрабатывает ответ от Яндекса после авторизации."""
+    code = request.args.get('code')
     error = request.args.get('error')
     if error:
         error_description = request.args.get('error_description', 'Нет описания')
-        return f"Ошибка авторизации: {error}. Описание: {error_description}"
-
-    code = request.args.get('code')
-    # state = request.args.get('state') # Получить state и проверить
-
+        flash(f"Ошибка авторизации Яндекса: {error}. Описание: {error_description}", 'danger')
+        return redirect(url_for('.index'))
+    
     if not code:
-        return redirect(url_for('auth.index', message="Ошибка: Не получен код авторизации от Яндекса."))
+        flash("Не получен код авторизации от Яндекса.", 'danger')
+        return redirect(url_for('.index'))
 
     # Обмен кода на токен
     token_url = 'https://oauth.yandex.ru/token'
@@ -115,24 +85,29 @@ def oauth_callback():
             error = response_data.get('error')
             error_description = response_data.get('error_description', 'Нет описания')
             print(f"Ошибка обмена кода на токен. Статус: {response.status_code}. Ошибка: {error}. Описание: {error_description}")
-            return redirect(url_for('auth.index', message=f"Ошибка получения токена: {error_description}"))
+            flash(f"Ошибка получения токена от Яндекса ({response.status_code}): {response.text}", 'danger')
+            return redirect(url_for('.index'))
+
+        token_data = response.json()
+        access_token = token_data.get('access_token')
+        refresh_token = token_data.get('refresh_token')
+        expires_in = token_data.get('expires_in')
+        if not access_token or not expires_in:
+            flash("Ответ Яндекса не содержит access_token или expires_in.", 'danger')
+            return redirect(url_for('.index'))
+
+        expires_at = datetime.now() + timedelta(seconds=int(expires_in))
 
         # --- Получение client_login --- 
-        access_token = response_data['access_token']
         client_login = get_yandex_client_login(access_token)
-
         if not client_login:
             print("Не удалось получить client_login от API Яндекса.")
-            return redirect(url_for('auth.index', message="Не удалось получить логин пользователя от Яндекса."))
+            flash("Не удалось получить логин пользователя от Яндекса.", 'danger')
+            return redirect(url_for('.index'))
         
         print(f"Успешно получен client_login: {client_login}")
 
         # --- Сохранение токена в БД --- 
-        expires_in = response_data['expires_in']
-        refresh_token = response_data.get('refresh_token') # refresh_token может не вернуться
-        expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
-
-        # Ищем существующий токен или создаем новый
         token_entry = Token.query.filter_by(yandex_login=client_login).first()
         if token_entry:
             print(f"Обновляем существующий токен для {client_login}")
@@ -155,28 +130,33 @@ def oauth_callback():
         except Exception as e_commit:
             db.session.rollback()
             print(f"Ошибка сохранения токена в БД: {e_commit}")
-            return redirect(url_for('auth.index', message="Ошибка сохранения данных авторизации."))
+            flash("Ошибка сохранения данных авторизации.", 'danger')
+            return redirect(url_for('.index'))
 
         # Сохраняем логин в сессии
         session['yandex_client_login'] = client_login
 
-        # Перенаправляем на главную с сообщением об успехе
-        return redirect(url_for('auth.index', message="Успешный вход и получение токена!"))
+        # Вместо редиректа рендерим шаблон с сообщением об успехе
+        return render_template('auth/login_success.html', client_login=client_login)
 
     except requests.exceptions.RequestException as e:
         print(f"Сетевая ошибка при обмене кода на токен: {e}")
-        return redirect(url_for('auth.index', message="Сетевая ошибка при получении токена."))
+        flash("Сетевая ошибка при получении токена.", 'danger')
+        return redirect(url_for('.index'))
     except KeyError as e:
         # Добавим response_data в лог ошибки
         print(f"Ошибка: Отсутствует ключ '{e}' в ответе при обмене кода на токен. Ответ: {response_data if 'response_data' in locals() else 'Не удалось получить ответ'}")
-        return redirect(url_for('auth.index', message="Ошибка формата ответа от Яндекса при получении токена."))
+        flash("Ошибка формата ответа от Яндекса при получении токена.", 'danger')
+        return redirect(url_for('.index'))
     except json.JSONDecodeError as e: # Добавляем обработку JSONDecodeError
         print(f"Ошибка декодирования JSON при обмене кода на токен: {e}. Ответ: {response.text if 'response' in locals() else 'Ответ не получен'}")
-        return redirect(url_for('auth.index', message="Ошибка чтения ответа от Яндекса."))
+        flash("Ошибка чтения ответа от Яндекса.", 'danger')
+        return redirect(url_for('.index'))
     except Exception as e:
         print(f"Непредвиденная ошибка при обмене кода на токен: {e}")
         db.session.rollback() # Откатываем транзакцию БД, если она была начата
-        return redirect(url_for('auth.index', message="Непредвиденная ошибка сервера."))
+        flash("Непредвиденная ошибка сервера.", 'danger')
+        return redirect(url_for('.index'))
 
 # --- Вспомогательная функция для получения client_login --- 
 def get_yandex_client_login(access_token):
@@ -229,8 +209,11 @@ def get_yandex_client_login(access_token):
 
 @auth_bp.route('/logout')
 def logout():
-    """Очищает сессию пользователя."""
-    session.pop('yandex_client_login', None)
-    session.pop('yandex_auth_code', None) # На всякий случай
-    # Можно добавить удаление токена из БД, но пока оставим
-    return redirect(url_for('auth.index', message="Вы успешно вышли.")) 
+    """Выход пользователя из системы (очистка сессии)."""
+    client_login = session.pop('yandex_client_login', None)
+    if client_login:
+        flash(f"Вы успешно вышли из системы ({client_login}).", 'info')
+        print(f"Пользователь {client_login} вышел из системы (сессия очищена).")
+    else:
+        flash("Вы не были авторизованы.", 'warning')
+    return redirect(url_for('.index')) 
