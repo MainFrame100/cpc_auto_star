@@ -14,10 +14,14 @@ from app.models import (
     WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
 )
 from app.auth.utils import get_valid_token
+from flask import current_app # Импортируем current_app для доступа к конфигурации
 
-# URL API Отчетов (песочница)
-REPORTS_API_SANDBOX_URL = os.getenv('DIRECT_API_SANDBOX_URL_REPORTS', 'https://api-sandbox.direct.yandex.com/json/v5/reports') # Уточним имя переменной
-DIRECT_API_CAMPAIGNS_URL = os.getenv('DIRECT_API_SANDBOX_URL_CAMPAIGNS', 'https://api-sandbox.direct.yandex.com/json/v5/campaigns') # Для кампаний
+# Импортируем клиент API и его исключение
+from ..api_clients.yandex_direct import YandexDirectClient, YandexDirectClientError
+
+# URL API Отчетов и Кампаний будут браться из конфигурации приложения
+# REPORTS_API_SANDBOX_URL = os.getenv('DIRECT_API_SANDBOX_URL_REPORTS', 'https://api-sandbox.direct.yandex.com/json/v5/reports')
+# DIRECT_API_CAMPAIGNS_URL = os.getenv('DIRECT_API_SANDBOX_URL_CAMPAIGNS', 'https://api-sandbox.direct.yandex.com/json/v5/campaigns')
 
 # Константы для ожидания отчета
 MAX_RETRIES = 15
@@ -140,11 +144,18 @@ def fetch_report(access_token: str, client_login: str, campaign_ids: list[int],
     retries = 0
     MAX_REPORT_RETRIES = 20 # Максимальное число попыток получить отчет
 
+    # Получаем URL API отчетов из конфигурации Flask
+    reports_api_url = current_app.config.get('DIRECT_API_V5_URL')
+    if not reports_api_url:
+        raise ValueError("Не удалось загрузить URL API v5 (для отчетов) из конфигурации Flask.")
+    # Добавляем путь к сервису отчетов
+    reports_api_url = f"{reports_api_url.rstrip('/')}/reports"
+
     while retries < MAX_REPORT_RETRIES:
         retries += 1
-        print(f"  Попытка {retries}/{MAX_REPORT_RETRIES}: Отправка POST-запроса для {report_name}...")
+        print(f"  Попытка {retries}/{MAX_REPORT_RETRIES}: Отправка POST-запроса для {report_name} к {reports_api_url}...")
         try:
-            response = requests.post(REPORTS_API_SANDBOX_URL, headers=headers_post, json=report_definition, timeout=60) # Добавим таймаут
+            response = requests.post(reports_api_url, headers=headers_post, json=report_definition, timeout=60)
             
             status_code = response.status_code
             request_id = response.headers.get("RequestId", "N/A")
@@ -269,83 +280,56 @@ def fetch_report(access_token: str, client_login: str, campaign_ids: list[int],
 # --- Функции для работы с API Campaigns --- 
 
 def get_active_campaigns(access_token: str, client_login: str) -> tuple[list[dict] | None, str | None]:
-    """Получает список активных кампаний пользователя из API Яндекс.Директ.
-
-    Args:
-        access_token: Действительный OAuth-токен.
-        client_login: Логин клиента в Яндекс.Директе.
-
-    Returns:
-        Кортеж: (campaign_list, error_message).
-        campaign_list: Список словарей с данными кампаний (Id, Name, State, Status, Type)
-                       или None при ошибке.
-        error_message: Строка с описанием ошибки или None при успехе.
-    """
-    print(f"Получение списка активных кампаний для {client_login}...")
-    campaigns_url = f"{DIRECT_API_CAMPAIGNS_URL}"
-    
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Client-Login": client_login,
-        "Accept-Language": "ru",
-        "Content-Type": "application/json; charset=utf-8"
-    }
-    # Запрашиваем только активные кампании (не архивные)
-    # Можно добавить и другие фильтры по состоянию/статусу, если нужно
-    payload = json.dumps({
-        "method": "get",
-        "params": {
-            "SelectionCriteria": {
-                 "States": ["ON", "OFF", "SUSPENDED"] # Исключаем ARCHIVED
-                 # Можно добавить "Statuses": ["ACCEPTED", "MODERATION", "DRAFT"] и т.п.
-            },
-            "FieldNames": ["Id", "Name", "State", "Status", "Type"] 
-        }
-    })
+    """Получает список кампаний клиента из API Директа, используя YandexDirectClient."""
+    print(f"Получение списка кампаний для {client_login} с использованием API клиента...")
 
     try:
-        response = requests.post(campaigns_url, headers=headers, data=payload, timeout=30)
-        units_used = response.headers.get("units", "N/A")
-        print(f"  Запрос кампаний: Статус {response.status_code}, Units: {units_used}")
-        response.raise_for_status()
-        data = response.json()
+        # Получаем URL из конфигурации Flask (так как utils вызываются в контексте приложения)
+        api_v5_url = current_app.config.get('DIRECT_API_V5_URL')
+        api_v501_url = current_app.config.get('DIRECT_API_V501_URL')
 
-        if "error" in data:
-            error = data['error']
-            error_message = f"Ошибка API при получении кампаний: Код {error.get('error_code', 'N/A')}, {error.get('error_string', 'N/A')}: {error.get('error_detail', 'N/A')}"
-            print(f"  {error_message}")
-            return None, error_message
-        elif data.get('result') and 'Campaigns' in data['result']:
-            campaign_list = data['result']['Campaigns']
-            print(f"  Получено {len(campaign_list)} активных кампаний.")
-            return campaign_list, None
-        else:
-            # Если Campaigns нет, но и ошибки нет - вероятно, кампаний просто 0
-            if data.get('result') is not None:
-                 print(f"  Активных кампаний не найдено для {client_login}.")
-                 return [], None # Возвращаем пустой список
-            else: 
-                 error_message = "Неожиданный формат ответа API при получении кампаний (нет result)."
-                 print(f"  {error_message}")
-                 print(f"  Ответ API: {data}")
-                 return None, error_message
+        if not api_v5_url or not api_v501_url:
+            raise ValueError("Не удалось загрузить URL API из конфигурации Flask.")
 
-    except requests.exceptions.Timeout:
-        error_message = "Таймаут при запросе списка кампаний."
+        # Создаем экземпляр клиента
+        api_client = YandexDirectClient(
+            access_token=access_token,
+            client_login=client_login,
+            api_v5_url=api_v5_url,
+            api_v501_url=api_v501_url
+        )
+
+        # Определяем поля, которые нам нужны для сбора статистики
+        field_names = ['Id', 'Name', 'State', 'Status', 'Type']
+        
+        # Вызываем метод клиента для получения кампаний
+        # Можно добавить SelectionCriteria, если нужно фильтровать, 
+        # например, по активному статусу: selection_criteria={"States": ["ON"]}
+        # Но пока получаем все и фильтруем ниже, если нужно
+        campaign_list = api_client.get_campaigns(field_names=field_names)
+        
+        print(f"  Получено {len(campaign_list)} кампаний через API клиент.")
+        
+        # Опционально: Фильтрация по статусу "ON" уже после получения
+        # active_campaign_list = [c for c in campaign_list if c.get('State') == 'ON']
+        # print(f"  Отфильтровано {len(active_campaign_list)} активных кампаний.")
+        # return active_campaign_list, None
+        
+        # Пока возвращаем все полученные кампании
+        return campaign_list, None
+
+    except YandexDirectClientError as e:
+        error_message = f"Ошибка API клиента при получении кампаний: {e}"
         print(f"  {error_message}")
         return None, error_message
-    except requests.exceptions.RequestException as e:
-        error_message = f"Сетевая ошибка при запросе кампаний: {e}"
+    except ValueError as e:
+        error_message = f"Ошибка конфигурации API клиента: {e}"
         print(f"  {error_message}")
-        return None, error_message
-    except json.JSONDecodeError as e:
-        error_message = f"Ошибка декодирования JSON при запросе кампаний: {e}"
-        print(f"  {error_message}")
-        print(f"  Raw response: {response.text[:500]}...")
         return None, error_message
     except Exception as e:
-        error_message = f"Непредвиденная ошибка при запросе кампаний: {e}"
+        error_message = f"Непредвиденная ошибка при запросе кампаний через клиент: {e}"
         print(f"  {error_message}")
+        traceback.print_exc() # Логируем traceback для непредвиденных ошибок
         return None, error_message
 
 # --- Основная функция сбора статистики --- 

@@ -2,14 +2,15 @@ import os
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from flask_sqlalchemy import SQLAlchemy # Нужен ли? Вроде db передается в refresh
-from app import db # Импортируем db
-from app.models import Token # Импортируем модель
+from flask_sqlalchemy import SQLAlchemy
+from flask import session, current_app
+from .. import db # <--- Изменяем импорт db
+from ..models import Token # <--- Изменяем импорт Token на относительный
 
-load_dotenv() # Загружаем переменные для YANDEX_CLIENT_ID/SECRET
-
-YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
-YANDEX_CLIENT_SECRET = os.getenv('YANDEX_CLIENT_SECRET')
+# YANDEX_CLIENT_ID и YANDEX_CLIENT_SECRET будут браться из конфигурации
+# load_dotenv() # Больше не нужно здесь
+# YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
+# YANDEX_CLIENT_SECRET = os.getenv('YANDEX_CLIENT_SECRET')
 
 # --- Функция для получения действительного токена --- 
 def get_valid_token(client_login):
@@ -60,17 +61,23 @@ def refresh_access_token(token_entry):
         print(f"Ошибка: Refresh token для {token_entry.yandex_login} отсутствует.")
         return False
 
-    # Проверяем наличие ID и секрета приложения
-    if not YANDEX_CLIENT_ID or not YANDEX_CLIENT_SECRET:
-        print("Ошибка: YANDEX_CLIENT_ID или YANDEX_CLIENT_SECRET не найдены в .env.")
+    # Проверяем наличие ID и секрета приложения в конфигурации
+    client_id = current_app.config.get('YANDEX_CLIENT_ID')
+    client_secret = current_app.config.get('YANDEX_CLIENT_SECRET')
+    if not client_id or not client_secret:
+        print("Ошибка: YANDEX_CLIENT_ID или YANDEX_CLIENT_SECRET не найдены в конфигурации приложения.")
         return False
 
-    token_url = 'https://oauth.yandex.ru/token'
+    # Получаем URL OAuth из конфигурации
+    base_oauth_url = current_app.config.get('OAUTH_BASE_URL')
+    token_url = f"{base_oauth_url}token" # Формируем URL для /token
+    print(f"Используем OAuth URL: {token_url}")
+
     payload = {
         'grant_type': 'refresh_token',
         'refresh_token': token_entry.refresh_token,
-        'client_id': YANDEX_CLIENT_ID,
-        'client_secret': YANDEX_CLIENT_SECRET
+        'client_id': client_id, # Используем из config
+        'client_secret': client_secret # Используем из config
     }
 
     try:
@@ -125,3 +132,39 @@ def refresh_access_token(token_entry):
         print(f"Непредвиденная ошибка при обновлении токена для {token_entry.yandex_login}: {e}")
         db.session.rollback()
         return False 
+
+def restore_session(client_login, app): # <--- Принимаем app
+    """
+    Восстанавливает сессию пользователя из БД.
+    Возвращает True если сессия восстановлена, False если нет.
+    Работает внутри контекста приложения.
+    """
+    print(f"[restore_session] Попытка восстановления для {client_login}")
+    if not client_login:
+        print("[restore_session] Ошибка: client_login не передан")
+        return False
+
+    # Запросы к БД и использование session должны быть внутри контекста приложения
+    with app.app_context(): # <--- Добавляем контекст
+        token_entry = Token.query.filter_by(yandex_login=client_login).first()
+        if not token_entry:
+            print(f"[restore_session] Токен для {client_login} не найден в БД.")
+            return False
+
+        # Проверяем срок действия токена
+        if datetime.utcnow() >= token_entry.expires_at - timedelta(minutes=1):
+            print(f"[restore_session] Токен для {client_login} истек или скоро истечет.")
+            if not token_entry.refresh_token:
+                print(f"[restore_session] Refresh token для {client_login} отсутствует.")
+                return False
+            
+            # Пытаемся обновить токен (refresh_access_token уже управляет commit/rollback)
+            if not refresh_access_token(token_entry):
+                print(f"[restore_session] Не удалось обновить токен для {client_login}.")
+                return False
+            # Если обновили, token_entry теперь содержит актуальный токен
+            print(f"[restore_session] Токен для {client_login} успешно обновлен перед восстановлением сессии.")
+
+        # Возвращаем True, если токен валиден или успешно обновлен
+        print(f"[restore_session] Токен для {client_login} валиден/обновлен. Запись в session пропускается.")
+        return True # Возвращаем True, если токен валиден/обновлен 

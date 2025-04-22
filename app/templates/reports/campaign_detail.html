@@ -90,9 +90,26 @@
             <p>Нет сводных данных за выбранный период.</p>
         {% endif %}
 
+        <!-- Форма для скачивания CSV -->
+        <div class="download-csv-form">
+            <h4>Скачать статистику в CSV</h4>
+            <form action="{{ url_for('reports.download_csv', campaign_id=campaign_id) }}" method="post">
+                 <div class="checkbox-group">
+                    <label><input type="checkbox" name="selected_slices" value="summary" checked> Сводка по неделям</label>
+                    <label><input type="checkbox" name="selected_slices" value="placements" checked> Площадки</label>
+                    <label><input type="checkbox" name="selected_slices" value="queries" checked> Поисковые запросы</label>
+                    <label><input type="checkbox" name="selected_slices" value="geo" checked> География</label>
+                    <label><input type="checkbox" name="selected_slices" value="devices" checked> Устройства</label>
+                    <label><input type="checkbox" name="selected_slices" value="demographics" checked> Пол и возраст</label>
+                 </div>
+                 <button type="submit" class="button">Скачать выбранные срезы в CSV</button>
+            </form>
+        </div>
+
         <!-- Вкладки для разных срезов данных -->
         <div class="tabs">
-            <div class="tab active" data-tab="placements">Площадки</div>
+            <div class="tab active" data-tab="summary">Сводка по неделям</div>
+            <div class="tab" data-tab="placements">Площадки</div>
             <div class="tab" data-tab="queries">Поисковые запросы</div>
             <div class="tab" data-tab="geo">География</div>
             <div class="tab" data-tab="devices">Устройства</div>
@@ -100,7 +117,51 @@
         </div>
 
         <!-- Содержимое вкладок -->
-        <div class="tab-content active" id="tab-placements">
+        <div class="tab-content active" id="tab-summary">
+            <h4>Сводная статистика по неделям</h4>
+             <div class="table-controls">
+                 {# Пустой блок для будущих контролов, если понадобятся #}
+             </div>
+             {% if weekly_campaign_stats %}
+                 <div class="table-container">
+                     <table class="summary-table">
+                         <thead>
+                             <tr>
+                                 <th class="sortable" data-sort="week">Неделя</th>
+                                 <th class="sortable numeric" data-sort="impressions">Показы</th>
+                                 <th class="sortable numeric" data-sort="clicks">Клики</th>
+                                 <th class="sortable numeric" data-sort="ctr">CTR, %</th>
+                                 <th class="sortable numeric" data-sort="cost">Расход, ₽</th>
+                                 <th class="sortable numeric" data-sort="cpc">CPC, ₽</th>
+                             </tr>
+                         </thead>
+                         <tbody>
+                             {% for stat in weekly_campaign_stats %}
+                                <tr>
+                                    <td>{{ stat.week_start.strftime('%d.%m.%Y') }} - {{ stat.week_end.strftime('%d.%m.%Y') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.impressions).replace(',', ' ') }}</td>
+                                    <td class="numeric">{{ "{:,}".format(stat.clicks).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set ctr = (stat.clicks / stat.impressions * 100) if stat.impressions > 0 else 0 %}
+                                        {{ "%.2f"|format(ctr) }}
+                                    </td>
+                                    <td class="numeric">{{ "{:,.2f}".format(stat.cost).replace(',', ' ') }}</td>
+                                    <td class="numeric">
+                                        {% set cpc = (stat.cost / stat.clicks) if stat.clicks > 0 else 0 %}
+                                        {{ "%.2f"|format(cpc) }}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                         </tbody>
+                     </table>
+                 </div>
+             {% else %}
+                 <p>Нет недельных данных по кампании за выбранный период.</p>
+             {% endif %}
+        </div>
+
+        <!-- Вкладка Площадки -->
+        <div class="tab-content" id="tab-placements">
             <h4>Статистика по площадкам (всего {{ placements_pagination.total if placements_pagination else 0 }} записей)</h4>
             
             <div class="table-controls">
@@ -111,7 +172,7 @@
                 </div>
                 
                 <div>
-                    <button class="button button-small">Экспорт CSV (TODO)</button>
+                    {# <button class="button button-small">Экспорт CSV (TODO)</button> -- Убрана #}
                     <button class="button button-small button-secondary">Заблокировать выбранные (TODO)</button>
                 </div>
             </div>
@@ -173,7 +234,7 @@
                 </div>
                 
                 <div>
-                    <button class="button button-small">Экспорт CSV (TODO)</button>
+                    {# <button class="button button-small">Экспорт CSV (TODO)</button> -- Убрана #}
                     <button class="button button-small button-secondary">Добавить в минус-слова (TODO)</button>
                 </div>
             </div>
@@ -225,9 +286,9 @@
         <div class="tab-content" id="tab-geo">
              <h4>Статистика по географии</h4>
              <div class="table-controls">
-                 {# Добавляем кнопку экспорта #}
+                 {# Добавляем кнопку экспорта - Убрана, т.к. есть общая #}
                  <div>
-                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                     {# <button class="button button-small">Экспорт CSV (TODO)</button> -- Убрана #}
                  </div>
              </div>
              {% if geo_stats %}
@@ -272,9 +333,9 @@
         <div class="tab-content" id="tab-devices">
             <h4>Статистика по устройствам</h4>
             <div class="table-controls">
-                 {# Добавляем кнопку экспорта #}
+                 {# Добавляем кнопку экспорта - Убрана #}
                  <div>
-                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                     {# <button class="button button-small">Экспорт CSV (TODO)</button> -- Убрана #}
                  </div>
              </div>
             {% if device_stats %}
@@ -319,9 +380,9 @@
         <div class="tab-content" id="tab-demographics">
             <h4>Статистика по полу и возрасту</h4>
             <div class="table-controls">
-                 {# Добавляем кнопку экспорта #}
+                 {# Добавляем кнопку экспорта - Убрана #}
                  <div>
-                     <button class="button button-small">Экспорт CSV (TODO)</button>
+                     {# <button class="button button-small">Экспорт CSV (TODO)</button> -- Убрана #}
                  </div>
              </div>
             {% if demographic_stats %}
@@ -330,7 +391,7 @@
                         <thead>
                             <tr>
                                 <th class="sortable" data-sort="gender">Пол</th>
-                                <th class="sortable" data-sort="age">Возраст</th>
+                                <th class="sortable" data-sort="age">Возрастная группа</th>
                                 <th class="sortable numeric" data-sort="impressions">Показы</th>
                                 <th class="sortable numeric" data-sort="clicks">Клики</th>
                                 <th class="sortable numeric" data-sort="ctr">CTR, %</th>

@@ -1,14 +1,26 @@
 from datetime import datetime, timedelta
 from app import db
+from flask_login import UserMixin
 from sqlalchemy import Date, Integer, String, Float, Index, UniqueConstraint, ForeignKey
 
 # Определение модели данных для токенов
-class Token(db.Model):
+class Token(db.Model, UserMixin):
     id = db.Column(db.Integer, primary_key=True) # Первичный ключ
     yandex_login = db.Column(db.String(80), unique=True, nullable=False) # Логин Яндекса, уникальный
     access_token = db.Column(db.String(200), nullable=False) # Токен доступа
     refresh_token = db.Column(db.String(200), nullable=True) # Токен обновления (может отсутствовать)
     expires_at = db.Column(db.DateTime, nullable=False) # Время истечения access_token
+
+    # --- Flask-Login required methods ---
+    def get_id(self):
+        """Возвращает ID для Flask-Login (используем yandex_login)."""
+        return str(self.yandex_login) # Flask-Login ожидает строку
+
+    # UserMixin предоставляет is_authenticated, is_active, is_anonymous
+    # is_active по умолчанию True, что нам подходит
+    # is_authenticated вернет True, если пользователь вошел (через login_user)
+    # is_anonymous вернет True, если пользователь не вошел
+    # -----------------------------------
 
     def __repr__(self):
         # Удобное представление объекта для отладки

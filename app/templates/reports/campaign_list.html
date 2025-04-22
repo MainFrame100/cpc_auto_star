@@ -71,7 +71,6 @@
                             <th class="sortable" data-sort="name">Название кампании</th>
                             <th class="sortable" data-sort="id">ID</th>
                             <th class="sortable" data-sort="type">Тип</th>
-                            <th class="sortable" data-sort="status">Статус</th>
                             <th class="sortable" data-sort="state">Состояние</th>
                             <th>Статистика</th>
                             <th>Действия</th>
@@ -87,24 +86,7 @@
                             </td>
                             <td>{{ campaign.Id }}</td>
                             <td>
-                                {% if campaign.Type == 'TEXT_CAMPAIGN' %}
-                                    <span class="badge bg-info">Текстовая</span>
-                                {% elif campaign.Type == 'PERFORMANCE_CAMPAIGN' %}
-                                    <span class="badge bg-primary">Performance</span>
-                                {% else %}
-                                    <span class="badge">{{ campaign.Type }}</span>
-                                {% endif %}
-                            </td>
-                            <td>
-                                {% if campaign.Status == 'ACCEPTED' %}
-                                    <span class="badge bg-success">Принята</span>
-                                {% elif campaign.Status == 'MODERATION' %}
-                                    <span class="badge bg-warning">На модерации</span>
-                                {% elif campaign.Status == 'DRAFT' %}
-                                    <span class="badge">Черновик</span>
-                                {% else %}
-                                    <span class="badge">{{ campaign.Status }}</span>
-                                {% endif %}
+                                <span class="badge">{{ campaign.readable_type }}</span>
                             </td>
                             <td>
                                 {% if campaign.State == 'ON' %}

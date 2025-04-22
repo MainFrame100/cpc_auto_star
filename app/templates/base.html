@@ -14,9 +14,9 @@
     <header>
         <h1><a href="{{ url_for('auth.index') }}">CPC Auto Helper</a></h1>
         <nav>
-            {# Здесь можно добавить ссылки навигации в будущем #}
-            {% if session.get('yandex_client_login') %}
-                <span>Пользователь: {{ session['yandex_client_login'] }}</span> | 
+            {# Используем current_user от Flask-Login для проверки аутентификации #}
+            {% if current_user.is_authenticated %}
+                <span>Пользователь: {{ current_user.yandex_login }}</span> | 
                 <a href="{{ url_for('auth.logout') }}">Выйти</a>
             {% else %}
                 <a href="{{ url_for('auth.login') }}">Войти через Яндекс</a>

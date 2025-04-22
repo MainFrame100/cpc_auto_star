@@ -2,19 +2,20 @@ import os
 import requests
 import json # Оставляем, может пригодиться для API
 from flask import redirect, request, url_for, session, current_app, flash, render_template # Добавляем current_app, flash, render_template
+from flask_login import login_user, logout_user, current_user # <--- Добавляем current_user
 from datetime import datetime, timedelta
 from urllib.parse import urlencode # Для формирования URL
 
 from . import auth_bp # Импортируем Blueprint
-from app import db # Импортируем db
-from app.models import Token # Импортируем модель
+from .. import db # Изменяем импорт db
+from ..models import Token # Изменяем импорт Token на относительный
 from .utils import get_valid_token, refresh_access_token # Импортируем утилиты
 
 # Переменные окружения будут загружены при создании app
-YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
-YANDEX_CLIENT_SECRET = os.getenv('YANDEX_CLIENT_SECRET')
+# YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
+# YANDEX_CLIENT_SECRET = os.getenv('YANDEX_CLIENT_SECRET')
 # Константа для URL API Директа (можно вынести в конфиг)
-DIRECT_API_SANDBOX_URL = 'https://api-sandbox.direct.yandex.com/json/v5/'
+# DIRECT_API_SANDBOX_URL = 'https://api-sandbox.direct.yandex.com/json/v5/' # Убираем, будем брать из конфига
 
 @auth_bp.route('/')
 def index():
@@ -27,9 +28,13 @@ def index():
 @auth_bp.route('/login')
 def login():
     """Перенаправляет пользователя на страницу авторизации Яндекса."""
-    if not YANDEX_CLIENT_ID:
+    # Получаем client_id из конфигурации приложения
+    client_id = current_app.config.get('YANDEX_CLIENT_ID')
+    if not client_id:
         # Можно использовать flash для сообщений об ошибках
-        return "Ошибка: YANDEX_CLIENT_ID не найден в .env файле.", 500
+        flash("Ошибка: YANDEX_CLIENT_ID не настроен в конфигурации приложения.", 'danger')
+        # Лучше редирект на главную или страницу ошибки
+        return redirect(url_for('.index'))
 
     # Redirect URI лучше брать из конфигурации приложения
     redirect_uri = url_for('auth.oauth_callback', _external=True)
@@ -40,8 +45,9 @@ def login():
     
     params = {
         'response_type': 'code',
-        'client_id': YANDEX_CLIENT_ID,
+        'client_id': client_id, # Используем client_id из конфига
         'redirect_uri': redirect_uri,
+        'scope': 'direct:api' # <--- ДОБАВЛЯЕМ ЗАПРОС ПРАВ НА API ДИРЕКТА
         # 'state': os.urandom(16).hex() # Хорошая практика добавить state
     }
     auth_url = f"https://oauth.yandex.ru/authorize?{urlencode(params)}"
@@ -62,6 +68,13 @@ def oauth_callback():
         flash("Не получен код авторизации от Яндекса.", 'danger')
         return redirect(url_for('.index'))
 
+    # Получаем client_id и client_secret из конфигурации
+    client_id = current_app.config.get('YANDEX_CLIENT_ID')
+    client_secret = current_app.config.get('YANDEX_CLIENT_SECRET')
+    if not client_id or not client_secret:
+        flash("Ошибка: Не настроены YANDEX_CLIENT_ID или YANDEX_CLIENT_SECRET.", 'danger')
+        return redirect(url_for('.index'))
+
     # Обмен кода на токен
     token_url = 'https://oauth.yandex.ru/token'
     redirect_uri = url_for('auth.oauth_callback', _external=True)
@@ -72,8 +85,8 @@ def oauth_callback():
     payload = {
         'grant_type': 'authorization_code',
         'code': code,
-        'client_id': YANDEX_CLIENT_ID,
-        'client_secret': YANDEX_CLIENT_SECRET,
+        'client_id': client_id, # Используем из конфига
+        'client_secret': client_secret, # Используем из конфига
         'redirect_uri': redirect_uri # Добавляем redirect_uri и сюда
     }
 
@@ -127,14 +140,17 @@ def oauth_callback():
         try: # Добавляем try-except вокруг commit
             db.session.commit()
             print(f"Токен для {client_login} сохранен/обновлен в БД.")
+            
+            # === Сообщаем Flask-Login, что пользователь вошел ===
+            login_user(token_entry, remember=True) # <--- Добавляем remember=True
+            print(f"Flask-Login notified for user: {client_login} (Remember Me: True)") 
+            # =====================================================
+
         except Exception as e_commit:
             db.session.rollback()
             print(f"Ошибка сохранения токена в БД: {e_commit}")
             flash("Ошибка сохранения данных авторизации.", 'danger')
             return redirect(url_for('.index'))
-
-        # Сохраняем логин в сессии
-        session['yandex_client_login'] = client_login
 
         # Вместо редиректа рендерим шаблон с сообщением об успехе
         return render_template('auth/login_success.html', client_login=client_login)
@@ -173,7 +189,10 @@ def get_yandex_client_login(access_token):
         }
     })
     
-    clients_url = f"{DIRECT_API_SANDBOX_URL}clients"
+    # Получаем базовый URL API из конфигурации приложения
+    base_api_url = current_app.config.get('DIRECT_API_BASE_URL', 'https://api-sandbox.direct.yandex.com/json/v5/') # Добавляем дефолт на всякий случай
+    clients_url = f"{base_api_url}clients" # Формируем URL для /clients
+    print(f"Запрос client_login к: {clients_url}")
     
     try:
         result = requests.post(clients_url, headers=headers, data=payload)
@@ -209,11 +228,13 @@ def get_yandex_client_login(access_token):
 
 @auth_bp.route('/logout')
 def logout():
-    """Выход пользователя из системы (очистка сессии)."""
-    client_login = session.pop('yandex_client_login', None)
-    if client_login:
-        flash(f"Вы успешно вышли из системы ({client_login}).", 'info')
-        print(f"Пользователь {client_login} вышел из системы (сессия очищена).")
+    """Выход пользователя из системы с использованием Flask-Login."""
+    yandex_login = current_user.yandex_login if current_user.is_authenticated else None
+    logout_user() # <--- Вызываем функцию выхода из Flask-Login
+    if yandex_login:
+        flash(f"Вы успешно вышли из системы ({yandex_login}).", 'info')
+        print(f"Пользователь {yandex_login} вышел из системы (Flask-Login).")
     else:
-        flash("Вы не были авторизованы.", 'warning')
-    return redirect(url_for('.index')) 
+        # Если пользователь не был аутентифицирован, все равно перенаправляем
+        flash("Вы вышли из системы.", 'info')
+    return redirect(url_for('.index')) # Перенаправляем на страницу входа 
