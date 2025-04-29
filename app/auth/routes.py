@@ -8,8 +8,7 @@ from urllib.parse import urlencode # Для формирования URL
 
 from . import auth_bp # Импортируем Blueprint
 from .. import db # Изменяем импорт db
-from ..models import Token # Изменяем импорт Token на относительный
-from .utils import get_valid_token, refresh_access_token # Импортируем утилиты
+from ..models import Token, User, Client, YandexAccount # Изменяем импорт Token, User, Client, YandexAccount на относительные
 
 # Переменные окружения будут загружены при создании app
 # YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
@@ -111,49 +110,118 @@ def oauth_callback():
 
         expires_at = datetime.now() + timedelta(seconds=int(expires_in))
 
-        # --- Получение client_login --- 
-        client_login = get_yandex_client_login(access_token)
-        if not client_login:
-            print("Не удалось получить client_login от API Яндекса.")
+        # --- Получение client_login (логин основного пользователя Яндекса) --- 
+        user_yandex_login = get_yandex_client_login(access_token)
+        if not user_yandex_login:
+            current_app.logger.error("Не удалось получить client_login основного пользователя от API Яндекса.")
             flash("Не удалось получить логин пользователя от Яндекса.", 'danger')
             return redirect(url_for('.index'))
         
-        print(f"Успешно получен client_login: {client_login}")
+        current_app.logger.info(f"Успешно получен логин основного пользователя: {user_yandex_login}")
 
-        # --- Сохранение токена в БД --- 
-        token_entry = Token.query.filter_by(yandex_login=client_login).first()
-        if token_entry:
-            print(f"Обновляем существующий токен для {client_login}")
-            token_entry.access_token = access_token
-            token_entry.refresh_token = refresh_token if refresh_token else token_entry.refresh_token # Обновляем RT только если он пришел
-            token_entry.expires_at = expires_at
+        # --- Находим или создаем пользователя сервиса (User) ---
+        user = User.query.filter_by(yandex_login=user_yandex_login).first()
+        if not user:
+            current_app.logger.info(f"Создаем нового пользователя User для {user_yandex_login}")
+            user = User(yandex_login=user_yandex_login)
+            db.session.add(user)
+            # Commit нужен здесь, чтобы получить user.id для связей ниже
+            try:
+                db.session.commit()
+                current_app.logger.info(f"Пользователь User {user_yandex_login} (ID: {user.id}) создан.")
+            except Exception as e_commit:
+                db.session.rollback()
+                current_app.logger.exception(f"Ошибка создания User в БД для {user_yandex_login}")
+                flash("Ошибка сохранения данных пользователя.", 'danger')
+                return redirect(url_for('.index'))
         else:
-            print(f"Создаем новую запись токена для {client_login}")
+            current_app.logger.info(f"Найден существующий пользователь User {user_yandex_login} (ID: {user.id})")
+
+        # --- Логика MVP: Используем основной аккаунт как первый подключенный --- 
+        # В будущем здесь будет выбор клиента и аккаунта для подключения
+        # Пока создадим клиента по умолчанию, если его нет, и подключим этот аккаунт
+        
+        client_name = "Мой Клиент по умолчанию"
+        client = Client.query.filter_by(user_id=user.id, name=client_name).first()
+        if not client:
+            current_app.logger.info(f"Создаем клиента по умолчанию '{client_name}' для User ID {user.id}")
+            client = Client(name=client_name, user_id=user.id)
+            db.session.add(client)
+            # Commit нужен здесь, чтобы получить client.id
+            try:
+                db.session.commit()
+                current_app.logger.info(f"Клиент '{client_name}' (ID: {client.id}) создан.")
+            except Exception as e_commit:
+                db.session.rollback()
+                current_app.logger.exception(f"Ошибка создания Client в БД для User ID {user.id}")
+                flash("Ошибка сохранения данных клиента.", 'danger')
+                return redirect(url_for('.index'))
+        else:
+             current_app.logger.info(f"Найден клиент по умолчанию '{client_name}' (ID: {client.id}) для User ID {user.id}")
+
+        # Находим или создаем YandexAccount (в данном случае логин совпадает с логином User)
+        yandex_account_login = user_yandex_login 
+        yandex_account = YandexAccount.query.filter_by(client_id=client.id, login=yandex_account_login).first()
+        if not yandex_account:
+            current_app.logger.info(f"Создаем YandexAccount {yandex_account_login} для Client ID {client.id}")
+            yandex_account = YandexAccount(login=yandex_account_login, client_id=client.id)
+            db.session.add(yandex_account)
+             # Commit нужен здесь, чтобы получить yandex_account.id
+            try:
+                db.session.commit()
+                current_app.logger.info(f"YandexAccount {yandex_account_login} (ID: {yandex_account.id}) создан.")
+            except Exception as e_commit:
+                db.session.rollback()
+                current_app.logger.exception(f"Ошибка создания YandexAccount в БД для Client ID {client.id}")
+                flash("Ошибка сохранения данных аккаунта.", 'danger')
+                return redirect(url_for('.index'))
+        else:
+             current_app.logger.info(f"Найден YandexAccount {yandex_account_login} (ID: {yandex_account.id}) для Client ID {client.id}")
+
+        # --- Сохранение или обновление токена с ШИФРОВАНИЕМ --- 
+        token_entry = Token.query.filter_by(yandex_account_id=yandex_account.id).first()
+        
+        # Шифруем токены ПЕРЕД сохранением
+        encrypted_access = Token.encrypt_data(access_token)
+        encrypted_refresh = Token.encrypt_data(refresh_token) # encrypt_data обработает None
+
+        if token_entry:
+            current_app.logger.info(f"Обновляем существующий токен для YandexAccount ID {yandex_account.id}")
+            token_entry.encrypted_access_token = encrypted_access
+            if encrypted_refresh: # Обновляем RT только если он пришел и успешно зашифровался
+                token_entry.encrypted_refresh_token = encrypted_refresh
+            token_entry.expires_at = expires_at
+            token_entry.user_id = user.id # Убедимся, что user_id проставлен
+        else:
+            current_app.logger.info(f"Создаем новую запись токена для YandexAccount ID {yandex_account.id}")
             token_entry = Token(
-                yandex_login=client_login,
-                access_token=access_token,
-                refresh_token=refresh_token,
+                yandex_account_id=yandex_account.id,
+                user_id=user.id, # Связываем с User!
+                encrypted_access_token=encrypted_access,
+                encrypted_refresh_token=encrypted_refresh,
                 expires_at=expires_at
             )
             db.session.add(token_entry)
         
-        try: # Добавляем try-except вокруг commit
+        try:
             db.session.commit()
-            print(f"Токен для {client_login} сохранен/обновлен в БД.")
+            current_app.logger.info(f"Токен для YandexAccount ID {yandex_account.id} сохранен/обновлен в БД.")
             
-            # === Сообщаем Flask-Login, что пользователь вошел ===
-            login_user(token_entry, remember=True) # <--- Добавляем remember=True
-            print(f"Flask-Login notified for user: {client_login} (Remember Me: True)") 
+            # === Сообщаем Flask-Login, что пользователь вошел (используем User) ===
+            login_user(user, remember=True) # <--- Передаем объект User
+            current_app.logger.info(f"Flask-Login notified for user: {user.yandex_login} (ID: {user.id}) (Remember Me: True)") 
             # =====================================================
 
         except Exception as e_commit:
             db.session.rollback()
-            print(f"Ошибка сохранения токена в БД: {e_commit}")
+            current_app.logger.exception(f"Ошибка сохранения Token в БД для YandexAccount ID {yandex_account.id}")
             flash("Ошибка сохранения данных авторизации.", 'danger')
             return redirect(url_for('.index'))
 
-        # Вместо редиректа рендерим шаблон с сообщением об успехе
-        return render_template('auth/login_success.html', client_login=client_login)
+        # Успешный вход
+        flash(f'Вход выполнен успешно для пользователя {user.yandex_login}.', 'success')
+        # Редирект на главную страницу приложения или дашборд
+        return redirect(url_for('main.index')) # Предполагаем, что есть main.index
 
     except requests.exceptions.RequestException as e:
         print(f"Сетевая ошибка при обмене кода на токен: {e}")
@@ -189,19 +257,25 @@ def get_yandex_client_login(access_token):
         }
     })
     
-    # Получаем базовый URL API из конфигурации приложения
-    base_api_url = current_app.config.get('DIRECT_API_BASE_URL', 'https://api-sandbox.direct.yandex.com/json/v5/') # Добавляем дефолт на всякий случай
-    clients_url = f"{base_api_url}clients" # Формируем URL для /clients
-    print(f"Запрос client_login к: {clients_url}")
+    # Получаем ПРАВИЛЬНЫЙ URL API v5 из конфигурации приложения
+    # Убираем старую логику с DIRECT_API_BASE_URL
+    api_v5_url = current_app.config.get('DIRECT_API_V5_URL')
+    if not api_v5_url:
+        current_app.logger.error("DIRECT_API_V5_URL не найден в конфигурации приложения!")
+        return None # Возвращаем None, чтобы вызвать ошибку в вызывающем коде
+        
+    clients_url = f"{api_v5_url}clients" # Формируем URL для /clients
+    current_app.logger.info(f"Запрос client_login к: {clients_url}") # Используем логгер
     
     try:
-        result = requests.post(clients_url, headers=headers, data=payload)
-        result.raise_for_status() # Проверка на HTTP ошибки (4xx, 5xx)
+        result = requests.post(clients_url, headers=headers, data=payload, timeout=15) # Добавляем таймаут
+        result.raise_for_status()
         data = result.json()
 
         if "error" in data:
             error = data['error']
-            print(f"Ошибка API при получении client_login: Код {error['error_code']}, {error['error_string']}: {error['error_detail']}")
+            # Используем логгер
+            current_app.logger.error(f"Ошибка API при получении client_login: Код {error.get('error_code')}, {error.get('error_string')}: {error.get('error_detail')}")
             return None
         
         # Извлекаем логин из ответа

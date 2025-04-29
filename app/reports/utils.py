@@ -10,14 +10,15 @@ import traceback # Для детального логирования ошибо
 # Импорты из приложения
 from app import db
 from app.models import (
-    Token, WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat, 
+    User, Client, YandexAccount, # Добавляем User, Client, YandexAccount
+    WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat, 
     WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
 )
-from app.auth.utils import get_valid_token
-from flask import current_app # Импортируем current_app для доступа к конфигурации
+from flask import current_app, flash # Импортируем current_app и flash
+from flask_login import current_user # Для получения user_id, если нужно
 
-# Импортируем клиент API и его исключение
-from ..api_clients.yandex_direct import YandexDirectClient, YandexDirectClientError
+# Импортируем клиент API и его исключения
+from ..api_clients.yandex_direct import YandexDirectClient, YandexDirectClientError, YandexDirectAuthError, YandexDirectTemporaryError
 
 # URL API Отчетов и Кампаний будут браться из конфигурации приложения
 # REPORTS_API_SANDBOX_URL = os.getenv('DIRECT_API_SANDBOX_URL_REPORTS', 'https://api-sandbox.direct.yandex.com/json/v5/reports')
@@ -79,14 +80,13 @@ def get_week_start_dates(n_weeks: int) -> list[date]:
         week_start_dates.append(monday)
     return sorted(week_start_dates) # Возвращаем от самой старой к самой новой
 
-def fetch_report(access_token: str, client_login: str, campaign_ids: list[int], 
+def fetch_report(api_client: YandexDirectClient, campaign_ids: list[int], 
                  date_from: date, date_to: date, field_names: list[str], report_name: str, 
                  report_type: str = 'CUSTOM_REPORT') -> tuple[list[dict] | None, str | None, str | None]:
     """Заказывает, ожидает и парсит отчет из API Яндекс.Директ v5.
 
     Args:
-        access_token: Действительный OAuth-токен.
-        client_login: Логин клиента в Яндекс.Директе.
+        api_client: Инициализированный экземпляр YandexDirectClient.
         campaign_ids: Список ID кампаний для отчета.
         date_from: Дата начала периода отчета.
         date_to: Дата окончания периода отчета.
@@ -100,24 +100,11 @@ def fetch_report(access_token: str, client_login: str, campaign_ids: list[int],
         raw_data: Сырой текст отчета (TSV) или None при ошибке.
         error_message: Строка с описанием ошибки или None при успехе.
     """
-    print(f"Запуск fetch_report для {len(campaign_ids)} кампаний ({campaign_ids[:3]}...), период: {date_from} - {date_to}, отчет: {report_name}")
+    current_app.logger.info(f"Запуск fetch_report для {len(campaign_ids)} кампаний ({campaign_ids[:3]}...) аккаунта {api_client.client_login}, период: {date_from} - {date_to}, отчет: {report_name}")
     if not campaign_ids:
         return [], None, "Список ID кампаний пуст."
 
-    # --- 1. Заказ отчета --- 
-    headers_post = {
-        'Authorization': f'Bearer {access_token}',
-        'Client-Login': client_login,
-        'Accept-Language': 'ru',
-        'Content-Type': 'application/json',
-        'returnMoneyInMicros': 'false',
-        'skipReportHeader': 'true',
-        'skipReportSummary': 'true' # Итоговая строка не нужна
-    }
-    if not client_login: # Если client_login пуст (например, для агентского аккаунта без выбора клиента)
-        headers_post.pop('Client-Login', None)
-
-    report_definition = {
+    report_payload = {
         'params': {
             'SelectionCriteria': {
                 'Filter': [{
@@ -125,583 +112,388 @@ def fetch_report(access_token: str, client_login: str, campaign_ids: list[int],
                     'Operator': 'IN',
                     'Values': [str(cid) for cid in campaign_ids]
                 }],
-                # Используем переданные даты
                 'DateFrom': date_from.strftime('%Y-%m-%d'),
                 'DateTo': date_to.strftime('%Y-%m-%d')
             },
             'FieldNames': field_names,
-            'ReportName': report_name, # Используем переданное имя
-            'ReportType': report_type, # Используем переданный тип
-            'DateRangeType': 'CUSTOM_DATE', # Явно указываем, что используем свои даты
+            'ReportName': report_name,
+            'ReportType': report_type,
+            'DateRangeType': 'CUSTOM_DATE',
             'Format': 'TSV',
-            'IncludeVAT': 'NO', # Обычно статистику смотрят без НДС
+            'IncludeVAT': 'NO',
             'IncludeDiscount': 'NO'
-            # 'Page': { 'Limit': 1000000 } # Можно раскомментировать, если строк очень много
         }
     }
 
     report_data_raw = None
     retries = 0
-    MAX_REPORT_RETRIES = 20 # Максимальное число попыток получить отчет
-
-    # Получаем URL API отчетов из конфигурации Flask
-    reports_api_url = current_app.config.get('DIRECT_API_V5_URL')
-    if not reports_api_url:
-        raise ValueError("Не удалось загрузить URL API v5 (для отчетов) из конфигурации Flask.")
-    # Добавляем путь к сервису отчетов
-    reports_api_url = f"{reports_api_url.rstrip('/')}/reports"
+    MAX_REPORT_RETRIES = 20
+    RETRY_DELAY_INITIAL = 5
+    RETRY_DELAY_MAX = 60
+    current_retry_delay = RETRY_DELAY_INITIAL
 
     while retries < MAX_REPORT_RETRIES:
         retries += 1
-        print(f"  Попытка {retries}/{MAX_REPORT_RETRIES}: Отправка POST-запроса для {report_name} к {reports_api_url}...")
+        current_app.logger.info(f"  Попытка {retries}/{MAX_REPORT_RETRIES}: Запрос статуса/данных отчета {report_name} для {api_client.client_login}...")
         try:
-            response = requests.post(reports_api_url, headers=headers_post, json=report_definition, timeout=60)
+            # Используем ВРЕМЕННОЕ РЕШЕНИЕ с прямым вызовом requests, пока не адаптируем _make_request
+            # TODO: Интегрировать с _make_request
+            reports_api_url = f"{api_client.api_v5_url}reports"
+            headers_post = api_client.headers.copy()
+            headers_post['returnMoneyInMicros'] = 'false'
+            headers_post['skipReportHeader'] = 'true' # Заголовки будем использовать из field_names
+            headers_post['skipReportSummary'] = 'true'
+            
+            response = requests.post(
+                reports_api_url, 
+                headers=headers_post, 
+                json=report_payload['params'], # Передаем только params
+                timeout=60
+            )
             
             status_code = response.status_code
             request_id = response.headers.get("RequestId", "N/A")
             units_used = response.headers.get("units", "N/A")
-            print(f"    Статус ответа: {status_code}. RequestId: {request_id}. Units: {units_used}")
+            current_app.logger.debug(f"    Статус ответа: {status_code}. RequestId: {request_id}. Units: {units_used}")
 
             if status_code == 200:
-                print(f"    Отчет {report_name} готов!")
+                current_app.logger.info(f"    Отчет {report_name} готов!")
                 report_data_raw = response.text
                 break
             elif status_code in [201, 202]:
-                retry_interval_header = response.headers.get("retryIn", "10") # Дефолт 10 сек
+                retry_interval_header = response.headers.get("retryIn", str(RETRY_DELAY_INITIAL))
                 try:
-                    retry_interval = max(int(retry_interval_header), 5) # Минимум 5 секунд
+                    retry_interval = min(max(int(retry_interval_header), 5), RETRY_DELAY_MAX)
                 except ValueError:
-                    retry_interval = 10
-                print(f"    Отчет {report_name} формируется. Повтор через {retry_interval} секунд...")
+                    retry_interval = current_retry_delay
+                    current_retry_delay = min(current_retry_delay * 2, RETRY_DELAY_MAX)
+                current_app.logger.info(f"    Отчет {report_name} формируется. Повтор через {retry_interval} секунд...")
                 time.sleep(retry_interval)
                 continue
             else:
-                # Попытаемся извлечь ошибку из тела ответа
-                error_detail = ""
+                error_detail = response.text[:500]
                 try:
                     error_data = response.json()
                     error_detail = json.dumps(error_data.get('error', {}), ensure_ascii=False)
                 except json.JSONDecodeError:
-                    error_detail = response.text[:500] # Первые 500 символов текста ошибки
-                
+                    pass # Оставляем текст ошибки
                 error_msg = f"Ошибка HTTP {status_code} при запросе отчета {report_name}. RequestId: {request_id}. Detail: {error_detail}"
-                print(error_msg)
-                response.raise_for_status() # Это вызовет HTTPError
-
-        except requests.exceptions.HTTPError as e_http:
-            error_msg = f"Ошибка HTTP при запросе отчета {report_name}: {e_http}. Ответ: {getattr(e_http.response, 'text', 'N/A')[:500]}"
-            print(error_msg)
+                current_app.logger.error(error_msg)
+                if status_code >= 500 and retries < MAX_REPORT_RETRIES // 2:
+                    current_app.logger.warning(f"    Серверная ошибка {status_code}. Повторяем попытку...")
+                    time.sleep(current_retry_delay)
+                    current_retry_delay = min(current_retry_delay * 2, RETRY_DELAY_MAX)
+                    continue
+                else:
             return None, None, error_msg 
+
         except requests.exceptions.Timeout:
-            error_msg = f"Таймаут при запросе отчета {report_name}. Повтор через 60 сек..."
-            print(error_msg)
-            time.sleep(60) 
-            continue # Продолжаем цикл
+            error_msg = f"Таймаут при запросе отчета {report_name}. Повтор через {current_retry_delay} сек..."
+            current_app.logger.warning(error_msg)
+            time.sleep(current_retry_delay)
+            current_retry_delay = min(current_retry_delay * 2, RETRY_DELAY_MAX)
+            continue
         except requests.exceptions.RequestException as e_req:
-            error_msg = f"Сетевая ошибка при запросе отчета {report_name}: {e_req}. Повтор через 60 сек..."
-            print(error_msg)
-            time.sleep(60)
-            continue # Продолжаем цикл
+            error_msg = f"Сетевая ошибка при запросе отчета {report_name}: {e_req}. Повтор через {current_retry_delay} сек..."
+            current_app.logger.warning(error_msg)
+            time.sleep(current_retry_delay)
+            current_retry_delay = min(current_retry_delay * 2, RETRY_DELAY_MAX)
+            continue
         except Exception as e_generic:
             error_msg = f"Непредвиденная ошибка при запросе отчета {report_name}: {e_generic}"
-            print(error_msg)
+            current_app.logger.exception(error_msg)
             return None, None, error_msg
 
     if report_data_raw is None:
          error_msg = f"Отчет {report_name} не был готов после {MAX_REPORT_RETRIES} попыток."
-         print(error_msg)
+         current_app.logger.error(error_msg)
          return None, None, error_msg
 
     # --- 3. Парсинг отчета (TSV) --- 
     parsed_data = []
     parsing_error_msg = None
     rows_processed = 0 
-    headers_list = [] 
     try:
-        print(f"Парсинг TSV данных отчета {report_name} с помощью csv.DictReader...")
+        current_app.logger.debug(f"Парсинг TSV данных отчета {report_name} ({len(report_data_raw)} байт)..." )
         report_file = io.StringIO(report_data_raw)
-
-        # Используем csv.DictReader. Он сам использует первую строку как заголовки.
-        # Убедимся, что в запросе skipReportHeader='false' (или не указан, что = false).
-        tsv_reader = csv.DictReader(report_file, delimiter='\t') 
-        headers_list = tsv_reader.fieldnames # Получаем заголовки из DictReader
+        # Используем переданные field_names как заголовки для DictReader
+        tsv_reader = csv.DictReader(report_file, fieldnames=field_names, delimiter='\t') 
         
-        if not headers_list:
-             print(f"  Отчет {report_name} не содержит заголовков столбцов (пустой?).")
-             return [], report_data_raw, None
-
-        print(f"  Заголовки столбцов из отчета {report_name}: {headers_list}")
-
-        # Читаем данные
-        for row in tsv_reader: # DictReader уже пропустил строку заголовков
+        for row in tsv_reader:
             rows_processed += 1
-            # Проверяем на строку итогов (на всякий случай)
-            # В DictReader ключи - это заголовки. Проверим первый ключ/значение.
-            first_key = headers_list[0] if headers_list else None
-            if first_key and str(row.get(first_key, '')).startswith("Total rows"):
-                 print("  Обнаружена и пропущена строка итогов.")
-                 continue
-
-            # Обрабатываем строку (row уже словарь)
             parsed_row = {}
+            try:
             for header, value in row.items():
-                if header is None: # Пропускаем колонки без заголовка (если вдруг есть)
-                    continue
-                # Логика преобразования '--' и типов
+                    if header is None: continue
+                    # Преобразование типов
+                    clean_value = None
                 if value == '--':
-                    parsed_row[header] = None 
-                else:
-                    try:
-                        # Пытаемся преобразовать в число (float, затем int)
-                        # Заменяем запятую на точку для совместимости
-                        num_val = float(value.replace(',', '.')) 
-                        if num_val.is_integer():
-                            parsed_row[header] = int(num_val)
-                        else:
-                            parsed_row[header] = num_val
-                    except (ValueError, TypeError): # Добавляем TypeError на случай None и др.
-                        parsed_row[header] = value # Оставляем как строку
-            
+                        clean_value = None
+                    elif header in ('Impressions', 'Clicks', 'CampaignId', 'AdGroupId', 'CriteriaId'): # Целочисленные
+                        try: clean_value = int(value) if value is not None else None
+                        except (ValueError, TypeError): clean_value = None
+                    elif header in ('Cost'): # С плавающей точкой
+                        try: clean_value = float(value) if value is not None else None
+                        except (ValueError, TypeError): clean_value = None
+                    else: # Строковые (оставляем как есть)
+                        clean_value = value
+                    parsed_row[header] = clean_value
             parsed_data.append(parsed_row)
+            except Exception as e_row:
+                 current_app.logger.error(f"Ошибка парсинга строки {rows_processed} в отчете {report_name}: {row}. Ошибка: {e_row}")
+                 # Можно пропустить строку или добавить обработку
 
-        print(f"  Парсинг отчета {report_name} завершен. Строк данных прочитано: {rows_processed}. Сохранено: {len(parsed_data)}.")
-        return parsed_data, report_data_raw, None
+        current_app.logger.debug(f"  Парсинг отчета {report_name} завершен. Строк: {rows_processed}. Спарсено: {len(parsed_data)}.")
 
-    except csv.Error as e_csv: # Ошибки CSV 
-        parsing_error_msg = f"Ошибка CSV парсинга в отчете {report_name} (строка ~{rows_processed+1}): {e_csv}"
-        print(parsing_error_msg)
-        return None, report_data_raw, parsing_error_msg 
-    except Exception as e_parse: # Любые другие ошибки парсинга
-        parsing_error_msg = f"Непредвиденная ошибка при парсинге отчета {report_name}: {e_parse}"
-        traceback.print_exc()
-        print(parsing_error_msg)
-        return None, report_data_raw, parsing_error_msg
+    except Exception as e_parse:
+        parsing_error_msg = f"Ошибка парсинга отчета {report_name}: {e_parse}"
+        current_app.logger.exception(parsing_error_msg)
+        # Возвращаем пустой список данных, но с сырыми данными и ошибкой
+        return [], report_data_raw, parsing_error_msg
 
-# --- Функции для работы с API Campaigns --- 
-
-def get_active_campaigns(access_token: str, client_login: str) -> tuple[list[dict] | None, str | None]:
-    """Получает список кампаний клиента из API Директа, используя YandexDirectClient."""
-    print(f"Получение списка кампаний для {client_login} с использованием API клиента...")
-
-    try:
-        # Получаем URL из конфигурации Flask (так как utils вызываются в контексте приложения)
-        api_v5_url = current_app.config.get('DIRECT_API_V5_URL')
-        api_v501_url = current_app.config.get('DIRECT_API_V501_URL')
-
-        if not api_v5_url or not api_v501_url:
-            raise ValueError("Не удалось загрузить URL API из конфигурации Flask.")
-
-        # Создаем экземпляр клиента
-        api_client = YandexDirectClient(
-            access_token=access_token,
-            client_login=client_login,
-            api_v5_url=api_v5_url,
-            api_v501_url=api_v501_url
-        )
-
-        # Определяем поля, которые нам нужны для сбора статистики
-        field_names = ['Id', 'Name', 'State', 'Status', 'Type']
-        
-        # Вызываем метод клиента для получения кампаний
-        # Можно добавить SelectionCriteria, если нужно фильтровать, 
-        # например, по активному статусу: selection_criteria={"States": ["ON"]}
-        # Но пока получаем все и фильтруем ниже, если нужно
-        campaign_list = api_client.get_campaigns(field_names=field_names)
-        
-        print(f"  Получено {len(campaign_list)} кампаний через API клиент.")
-        
-        # Опционально: Фильтрация по статусу "ON" уже после получения
-        # active_campaign_list = [c for c in campaign_list if c.get('State') == 'ON']
-        # print(f"  Отфильтровано {len(active_campaign_list)} активных кампаний.")
-        # return active_campaign_list, None
-        
-        # Пока возвращаем все полученные кампании
-        return campaign_list, None
-
-    except YandexDirectClientError as e:
-        error_message = f"Ошибка API клиента при получении кампаний: {e}"
-        print(f"  {error_message}")
-        return None, error_message
-    except ValueError as e:
-        error_message = f"Ошибка конфигурации API клиента: {e}"
-        print(f"  {error_message}")
-        return None, error_message
-    except Exception as e:
-        error_message = f"Непредвиденная ошибка при запросе кампаний через клиент: {e}"
-        print(f"  {error_message}")
-        traceback.print_exc() # Логируем traceback для непредвиденных ошибок
-        return None, error_message
+    return parsed_data, report_data_raw, None # Успех
 
 # --- Основная функция сбора статистики --- 
 
-def collect_weekly_stats_for_last_n_weeks(yandex_login: str, n_weeks: int = 4):
-    """Собирает еженедельную статистику за последние n полных недель для пользователя.
+def collect_weekly_stats_for_last_n_weeks(user_id: int, n_weeks: int = 4) -> tuple[bool, str]:
+    """Собирает еженедельную статистику за последние n недель для ВСЕХ аккаунтов пользователя.
 
     Args:
-        yandex_login: Логин пользователя в Яндексе.
-        n_weeks: Количество последних полных недель для сбора данных.
+        user_id (int): ID пользователя (User) в нашей БД.
+        n_weeks (int): Количество последних недель для сбора.
 
     Returns:
-        Кортеж (success, message).
-        success: True, если сбор прошел успешно (даже если данных не было), False при ошибке.
-        message: Сообщение о результате или ошибке.
+        tuple[bool, str]: (Успех, Сообщение)
     """
-    print(f"\n=== Запуск сбора еженедельной статистики для {yandex_login} за {n_weeks} недель ===")
-    
-    # 1. Получаем валидный токен
-    access_token = get_valid_token(yandex_login)
-    if not access_token:
-        error_msg = f"Не удалось получить действительный токен для {yandex_login}. Сбор остановлен."
-        print(error_msg)
-        return False, error_msg
-    print("Действующий токен получен.")
+    start_time = time.time()
+    current_app.logger.info(f"=== Запуск сбора статистики для User ID: {user_id}, за {n_weeks} нед. ===" )
 
-    # 2. Получаем список активных кампаний
-    campaign_list, error_msg_campaigns = get_active_campaigns(access_token, yandex_login)
-    if error_msg_campaigns:
-        print(f"Ошибка получения списка кампаний: {error_msg_campaigns}. Сбор остановлен.")
-        return False, f"Ошибка получения списка кампаний: {error_msg_campaigns}"
-    if not campaign_list:
-        print("Активные кампании не найдены. Сбор статистики не требуется.")
-        return True, "Активные кампании не найдены."
-    # Получаем только ID кампаний
-    campaign_ids = [c['Id'] for c in campaign_list]
-    print(f"Найдено {len(campaign_ids)} активных кампаний: {campaign_ids[:5]}...")
+    total_accounts_processed = 0
+    total_campaigns_processed = 0
+    total_reports_fetched = 0
+    total_rows_saved = 0
+    error_messages = []
 
-    # 3. Определяем даты недель
+    try:
+        # 1. Найти все активные YandexAccount пользователя
+        user = User.query.get(user_id)
+        if not user:
+             msg = f"Пользователь с ID {user_id} не найден."
+             current_app.logger.error(msg)
+             return False, msg
+        
+        accounts = db.session.query(YandexAccount).join(Client).filter(Client.user_id == user.id, YandexAccount.is_active == True).all()
+        if not accounts:
+            msg = f"Не найдено активных аккаунтов для пользователя {user.yandex_login} (ID: {user.id})."
+            current_app.logger.warning(msg)
+            return True, msg # Считаем это успехом, просто нечего собирать
+            
+        current_app.logger.info(f"Найдено {len(accounts)} активных аккаунтов для обработки.")
+
+        # 2. Определить даты недель
     week_start_dates = get_week_start_dates(n_weeks)
     if not week_start_dates:
-         print("Не удалось определить даты для сбора статистики. Сбор остановлен.")
-         return False, "Не удалось определить даты недель."
-    print(f"Будут обработаны недели, начинающиеся с: {week_start_dates}")
+            msg = "Не удалось определить даты недель."
+            current_app.logger.error(msg)
+            return False, msg
+        current_app.logger.info(f"Даты начала недель для сбора: {week_start_dates}")
 
-    # 4. Цикл по неделям
-    total_reports_requested = 0
-    total_errors = 0
-    all_stats_objects = [] 
+        # 3. Цикл по аккаунтам
+        for account in accounts:
+            total_accounts_processed += 1
+            current_app.logger.info(f"--- Обработка аккаунта ID: {account.id}, Логин: {account.login} ---")
+            account_campaigns_processed = 0
+            account_reports_fetched = 0
+            account_rows_saved = 0
+            account_errors = []
 
-    # Определяем ID кампании для теста (берем первую из списка)
-    test_campaign_id_list = campaign_ids[:1] if campaign_ids else []
-    if not test_campaign_id_list:
-        print("Нет кампаний для тестового запроса.")
-        return True, "Нет активных кампаний для сбора статистики."
-    print(f"!!! ТЕСТОВЫЙ РЕЖИМ: Запрашиваем данные только для кампании ID: {test_campaign_id_list[0]} !!!")
+            try:
+                # 3.1 Создать API клиент
+                api_client = YandexDirectClient(yandex_account_id=account.id, current_user_id=user.id)
 
-    for week_start in week_start_dates:
-        _, week_end = get_monday_and_sunday(week_start)
-        week_str = week_start.strftime('%Y-%m-%d')
-        print(f"\n-- Обработка недели: {week_str} ({week_start} - {week_end}) --")
-
-        # Предварительно удаляем ВСЕ данные для этого пользователя и этой недели из ВСЕХ таблиц
-        # Это гарантирует перезапись при обновлении.
-        # Возможно, лучше удалять только для конкретного среза перед его загрузкой?
-        # Пока удаляем всё для недели перед началом обработки срезов.
-        # TODO: Рассмотреть более гранулярное удаление.
-        try:
-            print(f"  Удаление старых данных для пользователя {yandex_login}, недели {week_str}...")
-            tables_to_clear = [
-                WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat,
-                WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
-            ]
-            deleted_counts = {}
-            for table_model in tables_to_clear:
-                # Используем db.session.query(table_model) вместо table_model.query 
-                # чтобы избежать конфликта имен с колонкой 'query' в WeeklySearchQueryStat
-                if table_model == WeeklyCampaignStat:
-                     delete_query = db.session.query(table_model).filter(
-                         table_model.yandex_login == yandex_login,
-                         table_model.week_start_date == week_start
-                     )
-                else:
-                     delete_query = db.session.query(table_model).filter(
-                         table_model.yandex_login == yandex_login,
-                         table_model.week_start_date == week_start
-                     )
+                # 3.2 Получить список АКТИВНЫХ кампаний
+                campaign_payload = {
+                     "method": "get",
+                     "params": {
+                         "SelectionCriteria": { "States": ["ON"] }, # Только включенные
+                         "FieldNames": ["Id", "Name"] # Нам нужны только ID
+                     }
+                 }
+                campaign_result = api_client._make_request('campaigns', campaign_payload, api_version='v5')
                 
-                deleted_count = delete_query.delete(synchronize_session=False) 
-                deleted_counts[table_model.__tablename__] = deleted_count
-            
-            db.session.commit() # Коммитим удаление
-            print(f"  Старые данные удалены: {deleted_counts}")
+                active_campaigns = []
+                if campaign_result and 'Campaigns' in campaign_result:
+                     active_campaigns = campaign_result['Campaigns']
+                
+                if not active_campaigns:
+                    current_app.logger.warning(f"Активные кампании не найдены для аккаунта {account.login}.")
+                    continue 
+                campaign_ids = [c['Id'] for c in active_campaigns]
+                current_app.logger.info(f"Найдено {len(campaign_ids)} активных кампаний для аккаунта {account.login}: {campaign_ids[:10]}...")
 
-        except Exception as e_delete:
-            db.session.rollback() # Откатываем транзакцию при ошибке удаления
-            error_msg_delete = f"Ошибка при удалении старых данных для недели {week_str}: {e_delete}"
-            print(f"  {error_msg_delete}")
-            traceback.print_exc()
-            total_errors += 1
-            continue # Пропускаем эту неделю, если не удалось очистить данные
+                # 3.3 Цикл по неделям
+                for week_start in week_start_dates:
+                    monday, sunday = get_monday_and_sunday(week_start)
+                    current_app.logger.info(f"  Обработка недели: {monday.strftime('%Y-%m-%d')} - {sunday.strftime('%Y-%m-%d')}")
 
-        # --- СБОР ДАННЫХ ПО КАМПАНИЯМ (базовый - ТОЛЬКО ОН ДЛЯ ТЕСТА) --- 
-        print(f"  Запрос статистики по КАМПАНИЯМ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_campaign = f"CampaignStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        # Передаем только тестовый ID кампании
-        parsed_data_camp, _, error_msg_camp = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list, 
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_CAMPAIGN, report_name=report_name_campaign
-        )
-        
-        if error_msg_camp:
-            print(f"    Ошибка API при получении отчета по кампаниям: {error_msg_camp}")
-            total_errors += 1
-        elif parsed_data_camp is not None:
-            print(f"    Получено {len(parsed_data_camp)} строк данных по кампаниям.")
-            # Преобразование и добавление в сессию
-            try:
-                for row in parsed_data_camp:
-                    # Проверяем наличие обязательных полей
-                    if row.get('CampaignId') is None:
-                        print(f"    Пропущена строка без CampaignId: {row}")
-                        continue
+                    # 3.4 Загрузка данных по срезам для ВСЕХ кампаний аккаунта за эту неделю
+                    report_date_suffix = monday.strftime('%Y%m%d')
+                    report_base_name = f"acc{account.id}_week{report_date_suffix}"
                     
-                    stat = WeeklyCampaignStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']), # API возвращает Id
-                        impressions=int(row.get('Impressions', 0) or 0), # Заменяем None на 0
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_camp)} записей WeeklyCampaignStat в список для коммита.")
-            except Exception as e_proc_camp:
-                print(f"    Ошибка обработки данных отчета по кампаниям: {e_proc_camp}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-             print("    Получен неожиданный результат (None) без ошибки от fetch_report для кампаний.")
-             total_errors += 1 # Считаем это ошибкой
-        
-        time.sleep(API_CALL_DELAY) # Пауза после запроса кампаний
-        
-        # === РАСКОММЕНТИРОВАТЬ БЛОКИ ДРУГИХ СРЕЗОВ ===
-        
-        # --- СБОР ДАННЫХ ПО ПЛОЩАДКАМ --- 
-        print(f"  Запрос статистики по ПЛОЩАДКАМ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_placement = f"PlacementStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        parsed_data_place, _, error_msg_place = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list,
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_PLACEMENT, report_name=report_name_placement
-        )
+                    # Определяем поля для каждого среза
+                    slices_to_fetch = {
+                        'campaign': {'fields': ['CampaignId', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklyCampaignStat},
+                        'placement': {'fields': ['CampaignId', 'Placement', 'AdNetworkType', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklyPlacementStat},
+                        # 'query': {'fields': ['CampaignId', 'AdGroupId', 'Query', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklySearchQueryStat}, # Пока отключаем
+                        'geo': {'fields': ['CampaignId', 'CriteriaId', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklyGeoStat},
+                        'device': {'fields': ['CampaignId', 'Device', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklyDeviceStat},
+                        'demographic': {'fields': ['CampaignId', 'Gender', 'Age', 'Impressions', 'Clicks', 'Cost'], 'model': WeeklyDemographicStat},
+                    }
+                    
+                    # Цикл по срезам
+                    for slice_key, slice_details in slices_to_fetch.items():
+                        report_name = f"{report_base_name}_{slice_key}"
+                        current_app.logger.debug(f"    Запрос отчета: {report_name}")
+                        
+                        # Вызываем АДАПТИРОВАННЫЙ fetch_report
+                        parsed_data, raw_data, error_msg = fetch_report(
+                            api_client=api_client, 
+                            campaign_ids=campaign_ids,
+                            date_from=monday,
+                            date_to=sunday,
+                            field_names=slice_details['fields'],
+                            report_name=report_name
+                        )
+                        
+                        if error_msg:
+                            err_msg = f"Ошибка при получении среза '{slice_key}' для недели {monday}: {error_msg}"
+                            current_app.logger.error(err_msg)
+                            account_errors.append(err_msg)
+                            continue 
+                        
+                        account_reports_fetched += 1
+                        current_app.logger.debug(f"    Отчет {report_name} получен, {len(parsed_data)} строк.")
 
-        if error_msg_place:
-            print(f"    Ошибка API при получении отчета по площадкам: {error_msg_place}")
-            total_errors += 1
-        elif parsed_data_place is not None:
-            print(f"    Получено {len(parsed_data_place)} строк данных по площадкам.")
-            try:
-                for row in parsed_data_place:
-                    if row.get('CampaignId') is None: continue # Пропускаем, если нет CampaignId
-                    stat = WeeklyPlacementStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']),
-                        placement=row.get('Placement'), # Может быть None
-                        ad_network_type=row.get('AdNetworkType'),
-                        impressions=int(row.get('Impressions', 0) or 0),
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_place)} записей WeeklyPlacementStat.")
-            except Exception as e_proc_place:
-                print(f"    Ошибка обработки данных отчета по площадкам: {e_proc_place}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-             print("    Получен неожиданный результат (None) без ошибки от fetch_report для площадок.")
-             total_errors += 1
-        
-        time.sleep(API_CALL_DELAY) 
-        
-        # --- СБОР ДАННЫХ ПО ЗАПРОСАМ --- 
-        print(f"  Запрос статистики по ЗАПРОСАМ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_query = f"QueryStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        parsed_data_query, _, error_msg_query = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list,
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_QUERY, report_name=report_name_query
-        )
+                        if not parsed_data:
+                             continue
 
-        if error_msg_query:
-            print(f"    Ошибка API при получении отчета по запросам: {error_msg_query}")
-            total_errors += 1
-        elif parsed_data_query is not None:
-            print(f"    Получено {len(parsed_data_query)} строк данных по запросам.")
-            try:
-                for row in parsed_data_query:
-                    if row.get('CampaignId') is None or row.get('AdGroupId') is None: continue
-                    stat = WeeklySearchQueryStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']),
-                        ad_group_id=int(row['AdGroupId']),
-                        query=row.get('Query'),
-                        impressions=int(row.get('Impressions', 0) or 0),
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_query)} записей WeeklySearchQueryStat.")
-            except Exception as e_proc_query:
-                print(f"    Ошибка обработки данных отчета по запросам: {e_proc_query}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-            print("    Получен неожиданный результат (None) без ошибки от fetch_report для запросов.")
-            total_errors += 1
-            
+                        # 3.5 Сохранение данных в БД
+                        Model = slice_details['model']
+                        rows_to_save = []
+                        
+                        # --- Удаление старых данных --- 
+                        try:
+                            # Формируем условия для удаления
+                            delete_conditions = [
+                                Model.yandex_account_id == account.id,
+                                Model.week_start_date == monday
+                            ]
+                            # Для срезов, где campaign_id не является частью PK, добавляем его
+                            if slice_key != 'campaign': # У WeeklyCampaignStat составной PK
+                                delete_conditions.append(Model.campaign_id.in_(campaign_ids))
+                            
+                            delete_q = Model.__table__.delete().where(*delete_conditions)
+                            result = db.session.execute(delete_q)
+                            db.session.commit() 
+                            current_app.logger.debug(f"    Удалено {result.rowcount} старых записей для {slice_key}, недели {monday}.")
+                        except Exception as e_del:
+                            db.session.rollback()
+                            current_app.logger.exception(f"    Ошибка при удалении старых данных для {slice_key}, недели {monday}.")
+                            account_errors.append(f"Ошибка очистки БД для {slice_key} недели {monday}.")
+                            continue 
+                        
+                        # --- Подготовка данных для сохранения --- 
+                        for row_dict in parsed_data:
+                            stat_entry = {}
+                            stat_entry['week_start_date'] = monday
+                            stat_entry['user_id'] = user.id
+                            stat_entry['client_id'] = account.client_id
+                            stat_entry['yandex_account_id'] = account.id
+                            
+                            # Сопоставление полей
+                            stat_entry['campaign_id'] = row_dict.get('CampaignId')
+                            stat_entry['impressions'] = row_dict.get('Impressions')
+                            stat_entry['clicks'] = row_dict.get('Clicks')
+                            stat_entry['cost'] = row_dict.get('Cost')
+                            
+                            # Добавляем поля конкретного среза
+                            if slice_key == 'placement':
+                                stat_entry['placement'] = row_dict.get('Placement')
+                                stat_entry['ad_network_type'] = row_dict.get('AdNetworkType')
+                            # elif slice_key == 'query': ...
+                            elif slice_key == 'geo':
+                                stat_entry['location_id'] = row_dict.get('CriteriaId')
+                            elif slice_key == 'device':
+                                stat_entry['device_type'] = row_dict.get('Device')
+                            elif slice_key == 'demographic':
+                                stat_entry['gender'] = row_dict.get('Gender')
+                                stat_entry['age_group'] = row_dict.get('Age')
+                            
+                            # Пропускаем строки с пустым campaign_id (для срезов, где он не PK)
+                            if slice_key != 'campaign' and stat_entry['campaign_id'] is None:
+                                continue
+                                
+                            rows_to_save.append(stat_entry)
+
+                        # --- Сохранение --- 
+                        if rows_to_save:
+                            try:
+                                db.session.bulk_insert_mappings(Model, rows_to_save)
+                                db.session.commit()
+                                account_rows_saved += len(rows_to_save)
+                                current_app.logger.debug(f"    Сохранено {len(rows_to_save)} строк для среза {slice_key}, недели {monday}.")
+                            except Exception as e_save:
+                                db.session.rollback()
+                                current_app.logger.exception(f"    Ошибка bulk insert для среза {slice_key}, недели {monday}. Данные: {rows_to_save[:2]}...")
+                                account_errors.append(f"Ошибка сохранения в БД для {slice_key} недели {monday}.")
+                        
+                        # Небольшая задержка между запросами отчетов
         time.sleep(API_CALL_DELAY)
 
-        # --- СБОР ДАННЫХ ПО ГЕОГРАФИИ --- 
-        print(f"  Запрос статистики по ГЕОГРАФИИ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_geo = f"GeoStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        parsed_data_geo, _, error_msg_geo = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list,
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_GEO, report_name=report_name_geo
-        )
-
-        if error_msg_geo:
-            print(f"    Ошибка API при получении отчета по гео: {error_msg_geo}")
-            total_errors += 1
-        elif parsed_data_geo is not None:
-            print(f"    Получено {len(parsed_data_geo)} строк данных по гео.")
-            try:
-                for row in parsed_data_geo:
-                    if row.get('CampaignId') is None or row.get('CriteriaId') is None: continue
-                    stat = WeeklyGeoStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']),
-                        location_id=int(row['CriteriaId']), # Переименовали поле модели для ясности
-                        impressions=int(row.get('Impressions', 0) or 0),
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_geo)} записей WeeklyGeoStat.")
-            except Exception as e_proc_geo:
-                print(f"    Ошибка обработки данных отчета по гео: {e_proc_geo}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-            print("    Получен неожиданный результат (None) без ошибки от fetch_report для гео.")
-            total_errors += 1
-            
-        time.sleep(API_CALL_DELAY)
-
-        # --- СБОР ДАННЫХ ПО УСТРОЙСТВАМ --- 
-        print(f"  Запрос статистики по УСТРОЙСТВАМ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_device = f"DeviceStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        parsed_data_device, _, error_msg_device = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list,
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_DEVICE, report_name=report_name_device
-        )
-
-        if error_msg_device:
-            print(f"    Ошибка API при получении отчета по устройствам: {error_msg_device}")
-            total_errors += 1
-        elif parsed_data_device is not None:
-            print(f"    Получено {len(parsed_data_device)} строк данных по устройствам.")
-            try:
-                for row in parsed_data_device:
-                    if row.get('CampaignId') is None: continue
-                    stat = WeeklyDeviceStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']),
-                        device_type=row.get('Device'), # API возвращает 'Device'
-                        impressions=int(row.get('Impressions', 0) or 0),
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_device)} записей WeeklyDeviceStat.")
-            except Exception as e_proc_device:
-                print(f"    Ошибка обработки данных отчета по устройствам: {e_proc_device}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-            print("    Получен неожиданный результат (None) без ошибки от fetch_report для устройств.")
-            total_errors += 1
-            
-        time.sleep(API_CALL_DELAY)
-
-        # --- СБОР ДАННЫХ ПО ДЕМОГРАФИИ --- 
-        print(f"  Запрос статистики по ПОЛУ И ВОЗРАСТУ для недели {week_str} (Кампания ID: {test_campaign_id_list[0]})...")
-        report_name_demo = f"DemographicStats_{yandex_login}_{week_str}_{datetime.now().strftime('%H%M%S')}"
-        total_reports_requested += 1
-        parsed_data_demo, _, error_msg_demo = fetch_report(
-            access_token=access_token, client_login=yandex_login, campaign_ids=test_campaign_id_list,
-            date_from=week_start, date_to=week_end, 
-            field_names=FIELDS_DEMOGRAPHIC, report_name=report_name_demo
-        )
-
-        if error_msg_demo:
-            print(f"    Ошибка API при получении отчета по демографии: {error_msg_demo}")
-            total_errors += 1
-        elif parsed_data_demo is not None:
-            print(f"    Получено {len(parsed_data_demo)} строк данных по демографии.")
-            try:
-                for row in parsed_data_demo:
-                    if row.get('CampaignId') is None: continue
-                    stat = WeeklyDemographicStat(
-                        yandex_login=yandex_login,
-                        week_start_date=week_start,
-                        campaign_id=int(row['CampaignId']),
-                        gender=row.get('Gender'), # API возвращает 'Gender'
-                        age_group=row.get('Age'),   # API возвращает 'Age'
-                        impressions=int(row.get('Impressions', 0) or 0),
-                        clicks=int(row.get('Clicks', 0) or 0),
-                        cost=float(row.get('Cost', 0.0) or 0.0)
-                    )
-                    all_stats_objects.append(stat)
-                print(f"    Добавлено {len(parsed_data_demo)} записей WeeklyDemographicStat.")
-            except Exception as e_proc_demo:
-                print(f"    Ошибка обработки данных отчета по демографии: {e_proc_demo}")
-                traceback.print_exc()
-                total_errors += 1
-        else:
-            print("    Получен неожиданный результат (None) без ошибки от fetch_report для демографии.")
-            total_errors += 1
-            
-        time.sleep(API_CALL_DELAY) # Пауза после последнего запроса недели
+                # Конец цикла по срезам
+            except YandexDirectAuthError as e_auth:
+                 error_msg = f"Ошибка доступа к аккаунту {account.login}: {e_auth}."
+                 current_app.logger.error(error_msg)
+                 error_messages.append(error_msg)
+                 continue # К следующему аккаунту
+            except YandexDirectClientError as e_api:
+                 error_msg = f"Ошибка API для аккаунта {account.login}: {e_api}"
+                 current_app.logger.error(error_msg)
+                 error_messages.append(error_msg)
+                 continue # К следующему аккаунту
+            except Exception as e_acc:
+                 error_msg = f"Непредвиденная ошибка для аккаунта {account.login}: {e_acc}"
+                 current_app.logger.exception(error_msg)
+                 error_messages.append(error_msg)
+                 continue # К следующему аккаунту
+            finally:
+                 total_reports_fetched += account_reports_fetched
+                 total_rows_saved += account_rows_saved
+                 current_app.logger.info(f"--- Аккаунт {account.login} обработан. Отчетов: {account_reports_fetched}, Сохранено строк: {account_rows_saved}. Ошибок: {len(account_errors)} ---")
         
-        # Конец цикла по неделям? Нет, это внутри цикла. Коммит - после цикла
+        # Конец цикла по аккаунтам
 
-    # --- Конец цикла по неделям ---
+        # --- Финальное сообщение --- 
+        end_time = time.time()
+        duration = end_time - start_time
+        summary_msg = (
+            f"Сбор статистики завершен за {duration:.2f} сек. "
+            f"Обработано аккаунтов: {total_accounts_processed}, "
+            # f"Кампаний: {total_campaigns_processed}, " # Считаем только обработанные аккаунты
+            f"Получено отчетов: {total_reports_fetched}, "
+            f"Сохранено строк: {total_rows_saved}."
+        )
+        if error_messages:
+            summary_msg += f" Обнаружены ошибки ({len(error_messages)}): {'; '.join(error_messages[:3])}..."
+            current_app.logger.error(summary_msg)
+            current_app.logger.error(f"Полный список ошибок: {error_messages}")
+            # Возвращаем False, так как были ошибки
+            return False, summary_msg 
+        else:
+            current_app.logger.info(summary_msg)
+            return True, summary_msg
 
-    # 5. Массовое добавление и коммит всех собранных данных
-    if all_stats_objects:
-        print(f"\nДобавление {len(all_stats_objects)} объектов статистики в сессию БД...")
-        try:
-            db.session.add_all(all_stats_objects)
-            print("Коммит транзакции в БД...")
-            db.session.commit()
-            print("Коммит успешно завершен.")
-            final_message = f"Сбор статистики завершен. Запрошено отчетов: {total_reports_requested}. Ошибок: {total_errors}. Добавлено записей: {len(all_stats_objects)}."
-            print(f"=== {final_message} ===")
-            return True, final_message
-        except Exception as e_commit:
-            db.session.rollback()
-            error_msg_commit = f"Критическая ошибка при коммите данных в БД: {e_commit}"
-            print(error_msg_commit)
-            traceback.print_exc()
-            return False, error_msg_commit
-    elif total_errors > 0:
-        error_msg_final = f"Сбор статистики завершен с ошибками ({total_errors} ошибок). Данные не были сохранены."
-        print(f"=== {error_msg_final} ===")
-        return False, error_msg_final
-    else:
-        final_message = "Сбор статистики завершен. Новых данных для сохранения не найдено."
-        print(f"=== {final_message} ===")
-        return True, final_message
+    except Exception as e_global:
+        error_msg = f"Глобальная ошибка при сборе статистики для User ID {user_id}: {e_global}"
+        current_app.logger.exception(error_msg)
+        return False, error_msg

@@ -6,9 +6,11 @@ load_dotenv(os.path.join(basedir, '..', '.env')) # Загружаем .env из 
 
 class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'you-will-never-guess'
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-        'sqlite:///' + os.path.join(basedir, '..', 'instance', 'tokens.db') # Путь к БД в instance
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URI')
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # Добавляем чтение ключа шифрования
+    ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY')
 
     # --- Yandex OAuth --- 
     YANDEX_CLIENT_ID = os.environ.get('YANDEX_CLIENT_ID')

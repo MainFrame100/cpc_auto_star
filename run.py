@@ -1,19 +1,18 @@
 from app import create_app, db
-# Импортируем все модели, чтобы SQLAlchemy их "увидел"
-from app.models import Token, WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat, WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
+# Импортируем модели, чтобы Flask-Migrate их видел, но их не обязательно импортировать все здесь
+# Достаточно, чтобы они были импортированы где-то, когда create_app() вызывается.
+# Например, они импортируются в app/__init__.py через user_loader или внутри blueprints.
+# from app.models import User, Client, YandexAccount, Token, WeeklyCampaignStat, WeeklyPlacementStat, WeeklySearchQueryStat, WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
 
 app = create_app()
 
-# Создаем таблицы в БД, если они еще не существуют
-# Это нужно делать в контексте приложения
-with app.app_context():
-    print("Creating database tables if they don't exist...")
-    db.create_all()
-    print("Database tables checked/created.")
+# УДАЛЕНО: db.create_all() - Управляется через Flask-Migrate
+# with app.app_context():
+#     print("Creating database tables if they don't exist...")
+#     db.create_all()
+#     print("Database tables checked/created.")
 
 if __name__ == '__main__':
-    # Запускаем сервер разработки Flask
-    # debug=True включает автоматическую перезагрузку при изменениях кода
-    # и подробные сообщения об ошибках в браузере.
-    # ВНИМАНИЕ: Никогда не используйте debug=True в продакшене!
-    app.run(debug=True) 
+    # host='0.0.0.0' делает сервер доступным извне контейнера
+    # debug=True - для разработки, автоперезагрузка и отладчик
+    app.run(host='0.0.0.0', debug=True) # Используем переменные окружения для порта и отладки позже 
