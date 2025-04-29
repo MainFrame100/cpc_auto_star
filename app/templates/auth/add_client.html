@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Добавить клиента{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Добавить нового клиента</h2>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}" role="alert">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <form method="POST" action="{{ url_for('auth.add_client') }}">
+        <div class="mb-3">
+            <label for="client_name" class="form-label">Название клиента</label>
+            <input type="text" class="form-control" id="client_name" name="client_name" required>
+            <div class="form-text">Введите понятное название для вашего клиента или проекта.</div>
+        </div>
+        <button type="submit" class="btn btn-primary">Добавить</button>
+        <a href="{{ url_for('auth.list_clients') }}" class="btn btn-secondary">Отмена</a>
+    </form>
+
+</div>
+{% endblock %} 

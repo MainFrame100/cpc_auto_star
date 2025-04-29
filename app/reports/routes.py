@@ -467,3 +467,22 @@ def download_csv(campaign_id):
         traceback.print_exc()
         flash(f"Не удалось сгенерировать CSV файл. {error_message}", "danger")
         return redirect(url_for('.view_campaign_detail', campaign_id=campaign_id))
+
+# --- Роут для общей статистики по клиенту (Заглушка) --- 
+
+@reports_bp.route('/client/<int:client_id>/summary')
+@login_required
+def client_summary(client_id):
+    """Отображает сводную статистику по выбранному клиенту (пока заглушка)."""
+    user = current_user
+    # Проверяем, принадлежит ли клиент текущему пользователю
+    client = Client.query.filter_by(id=client_id, user_id=user.id).first_or_404()
+    
+    current_app.logger.info(f"[reports.client_summary] User {user.yandex_login} viewing summary for client {client.name} (ID: {client_id})")
+    
+    # TODO: В будущем здесь будет логика получения и агрегации данных из БД
+    
+    return render_template(
+        'reports/client_summary_stub.html', 
+        client=client
+    )

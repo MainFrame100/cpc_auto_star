@@ -14,13 +14,29 @@
     <header>
         <h1><a href="{{ url_for('auth.index') }}">CPC Auto Helper</a></h1>
         <nav>
-            {# Используем current_user от Flask-Login для проверки аутентификации #}
+            {# Добавляем список ul для корректной структуры #}
+            <ul class="nav-list">
             {% if current_user.is_authenticated %}
-                <span>Пользователь: {{ current_user.yandex_login }}</span> | 
-                <a href="{{ url_for('auth.logout') }}">Выйти</a>
+                <li class="nav-item">
+                    {# Ссылка на список кампаний (из blueprint 'reports') #}
+                    <a class="nav-link" href="{{ url_for('reports.campaigns') }}">Кампании</a>
+                </li>
+                <li class="nav-item">
+                    {# Ссылка на список клиентов (из blueprint 'auth') #}
+                    <a class="nav-link" href="{{ url_for('auth.list_clients') }}">Мои клиенты</a>
+                </li>
+                <li class="nav-item user-info">
+                    <span class="nav-link disabled">Пользователь: {{ current_user.yandex_login }}</span>
+                </li>
+                 <li class="nav-item logout-link">
+                    <a href="{{ url_for('auth.logout') }}">Выйти</a>
+                </li>
             {% else %}
-                <a href="{{ url_for('auth.login') }}">Войти через Яндекс</a>
+                <li class="nav-item login-link">
+                    <a href="{{ url_for('auth.login') }}">Войти через Яндекс</a>
+                </li>
             {% endif %}
+            </ul>
         </nav>
     </header>
 

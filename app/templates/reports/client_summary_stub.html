@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Статистика клиента: {{ client.name }}{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Статистика клиента: {{ client.name }} (ID: {{ client.id }})</h2>
+    
+    <div class="alert alert-info" role="alert">
+        Здесь будет отображаться сводная статистика по всем кампаниям клиента за выбранный период.
+        <br>
+        (Реализация этой страницы запланирована на следующих этапах)
+    </div>
+
+    {# TODO: Добавить кнопку/форму для запуска обновления данных для ЭТОГО клиента #}
+    <form action="{{ url_for('reports.update_client_data', client_id=client.id) }}" method="POST" class="mb-3">
+        <button type="submit" class="btn btn-warning">Обновить данные клиента (ЗАГЛУШКА)</button>
+    </form>
+
+    <a href="{{ url_for('auth.list_clients') }}" class="btn btn-secondary">Назад к списку клиентов</a>
+
+    {# Сюда можно будет добавить таблицы или графики со статистикой #}
+
+</div>
+{% endblock %} 

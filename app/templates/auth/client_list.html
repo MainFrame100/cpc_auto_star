@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Мои клиенты{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Мои клиенты</h2>
+
+    <a href="{{ url_for('auth.add_client') }}" class="btn btn-success mb-3">Добавить нового клиента</a>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}" role="alert">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    {% if clients %}
+        <ul class="list-group">
+            {% for client in clients %}
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <h5>{{ client.name }}</h5>
+                        <small class="text-muted">ID: {{ client.id }} | Создан: {{ client.created_at.strftime('%d.%m.%Y') }}</small>
+                        
+                        {# Список привязанных аккаунтов #}
+                        {% if client.yandex_accounts %}
+                            <ul class="list-unstyled mt-2">
+                                {% for account in client.yandex_accounts %}
+                                    <li>
+                                        <i class="bi bi-google" style="color: #dc3545;"></i> <!-- Иконка Яндекса -->
+                                        {{ account.login }} 
+                                        <span class="badge bg-{{ 'success' if account.is_active else 'secondary' }}">
+                                            {{ 'Активен' if account.is_active else 'Неактивен' }}
+                                        </span>
+                                        {# Можно добавить кнопку "Отвязать" или "Деактивировать" #}
+                                    </li>
+                                {% endfor %}
+                            </ul>
+                        {% else %}
+                            <p class="text-muted mt-2">К этому клиенту еще не привязаны аккаунты Яндекс.Директ.</p>
+                        {% endif %}
+                    </div>
+                    <div>
+                        {# Кнопка для просмотра статистики клиента (новый роут) #}
+                        <a href="{{ url_for('reports.client_summary', client_id=client.id) }}" class="btn btn-info btn-sm me-2">Статистика</a>
+                        {# Кнопка для запуска OAuth флоу с передачей client_id #}
+                        <a href="{{ url_for('auth.yandex_authorize', client_id=client.id) }}" class="btn btn-primary btn-sm">Добавить аккаунт Яндекса</a>
+                        {# Можно добавить кнопки "Редактировать", "Удалить клиента" #}
+                    </div>
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>У вас пока нет созданных клиентов.</p>
+    {% endif %}
+
+</div>
+{% endblock %} 

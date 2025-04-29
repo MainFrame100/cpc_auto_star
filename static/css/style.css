@@ -42,32 +42,51 @@
   }
   
   header {
-    background-color: var(--color-primary);
-    color: white;
+    background-color: #0056b3;
+    color: #f0f0f0;
     box-shadow: var(--shadow-md);
     position: sticky;
     top: 0;
     z-index: 100;
+    padding: var(--spacing-sm) var(--spacing-md);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
   }
   
   header h1 a {
-    color: white;
+    color: #f0f0f0;
     text-decoration: none;
   }
   
   header nav {
-    float: right;
+    align-self: flex-end;
+    padding-bottom: var(--spacing-xs);
   }
   
-  header nav a,
-  header nav span {
-    color: white;
+  header nav ul.nav-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    align-items: center;
+  }
+  
+  header nav ul.nav-list li.nav-item {
     margin-left: var(--spacing-md);
-    text-decoration: none;
   }
   
-  header nav a:hover {
+  header nav ul.nav-list a,
+  header nav ul.nav-list span {
+    color: #f0f0f0;
+    text-decoration: none;
+    display: block;
+    padding: var(--spacing-xs) 0;
+  }
+  
+  header nav ul.nav-list a:hover {
     text-decoration: underline;
+    color: #ffffff;
   }
   
   main {

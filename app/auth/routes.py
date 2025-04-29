@@ -2,13 +2,15 @@ import os
 import requests
 import json # Оставляем, может пригодиться для API
 from flask import redirect, request, url_for, session, current_app, flash, render_template # Добавляем current_app, flash, render_template
-from flask_login import login_user, logout_user, current_user # <--- Добавляем current_user
+from flask_login import login_user, logout_user, current_user, login_required # <--- Добавляем current_user и login_required
 from datetime import datetime, timedelta
 from urllib.parse import urlencode # Для формирования URL
+import secrets # Для генерации state
 
 from . import auth_bp # Импортируем Blueprint
-from .. import db # Изменяем импорт db
+from .. import db, Config # Изменяем импорт db и Config
 from ..models import Token, User, Client, YandexAccount # Изменяем импорт Token, User, Client, YandexAccount на относительные
+from .utils import get_yandex_user_info # Предполагаем, что эта функция есть
 
 # Переменные окружения будут загружены при создании app
 # YANDEX_CLIENT_ID = os.getenv('YANDEX_CLIENT_ID')
@@ -16,13 +18,17 @@ from ..models import Token, User, Client, YandexAccount # Изменяем им�
 # Константа для URL API Директа (можно вынести в конфиг)
 # DIRECT_API_SANDBOX_URL = 'https://api-sandbox.direct.yandex.com/json/v5/' # Убираем, будем брать из конфига
 
+# Константы для OAuth
+YANDEX_AUTHORIZE_URL = "https://oauth.yandex.ru/authorize"
+YANDEX_TOKEN_URL = "https://oauth.yandex.ru/token"
+
 @auth_bp.route('/')
 def index():
-    """Главная страница аутентификации."""
-    # Получаем сообщение из GET параметра (если есть)
-    message = request.args.get('message') 
-    # Рендерим шаблон вместо возврата строки
-    return render_template('auth/index.html', message=message)
+    """Главная страница аутентификации / или дашборд после логина."""
+    if current_user.is_authenticated:
+        # Если пользователь уже вошел, редиректим на список клиентов
+        return redirect(url_for('auth.list_clients'))
+    return render_template('auth/index.html')
 
 @auth_bp.route('/login')
 def login():
@@ -55,14 +61,14 @@ def login():
 
 @auth_bp.route('/oauth-callback')
 def oauth_callback():
-    """Обрабатывает ответ от Яндекса после авторизации."""
+    """Обрабатывает ответ от Яндекса ПОСЛЕ АВТОРИЗАЦИИ ДЛЯ ВХОДА В ПРИЛОЖЕНИЕ."""
     code = request.args.get('code')
     error = request.args.get('error')
     if error:
         error_description = request.args.get('error_description', 'Нет описания')
         flash(f"Ошибка авторизации Яндекса: {error}. Описание: {error_description}", 'danger')
         return redirect(url_for('.index'))
-    
+
     if not code:
         flash("Не получен код авторизации от Яндекса.", 'danger')
         return redirect(url_for('.index'))
@@ -75,57 +81,55 @@ def oauth_callback():
         return redirect(url_for('.index'))
 
     # Обмен кода на токен
-    token_url = 'https://oauth.yandex.ru/token'
+    token_url = YANDEX_TOKEN_URL # Используем константу
     redirect_uri = url_for('auth.oauth_callback', _external=True)
     # Снова проверка на http для локалки
     if redirect_uri.startswith('https'):
        redirect_uri = redirect_uri.replace('https', 'http', 1)
-       
+
     payload = {
         'grant_type': 'authorization_code',
         'code': code,
-        'client_id': client_id, # Используем из конфига
-        'client_secret': client_secret, # Используем из конфига
-        'redirect_uri': redirect_uri # Добавляем redirect_uri и сюда
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'redirect_uri': redirect_uri
     }
 
+    access_token = None # Инициализируем access_token
     try:
         response = requests.post(token_url, data=payload)
-        response_data = response.json()
+        response_data = response.json() # Получаем ответ один раз
 
         if response.status_code != 200:
             error = response_data.get('error')
             error_description = response_data.get('error_description', 'Нет описания')
-            print(f"Ошибка обмена кода на токен. Статус: {response.status_code}. Ошибка: {error}. Описание: {error_description}")
+            current_app.logger.error(f"Ошибка обмена кода на токен. Статус: {response.status_code}. Ошибка: {error}. Описание: {error_description}")
             flash(f"Ошибка получения токена от Яндекса ({response.status_code}): {response.text}", 'danger')
             return redirect(url_for('.index'))
 
-        token_data = response.json()
-        access_token = token_data.get('access_token')
-        refresh_token = token_data.get('refresh_token')
-        expires_in = token_data.get('expires_in')
-        if not access_token or not expires_in:
-            flash("Ответ Яндекса не содержит access_token или expires_in.", 'danger')
+        access_token = response_data.get('access_token')
+        # Refresh token и expires_in нам здесь не нужны для простого входа
+        if not access_token:
+            flash("Ответ Яндекса не содержит access_token.", 'danger')
             return redirect(url_for('.index'))
-
-        expires_at = datetime.now() + timedelta(seconds=int(expires_in))
-
-        # --- Получение client_login (логин основного пользователя Яндекса) --- 
-        user_yandex_login = get_yandex_client_login(access_token)
+            
+        # --- Получение логина пользователя Яндекса --- 
+        # Используем access_token ТОЛЬКО для идентификации
+        user_info = get_yandex_user_info(access_token)
+        user_yandex_login = user_info.get('login')
         if not user_yandex_login:
-            current_app.logger.error("Не удалось получить client_login основного пользователя от API Яндекса.")
+            # get_yandex_user_info уже залогировал ошибку
             flash("Не удалось получить логин пользователя от Яндекса.", 'danger')
             return redirect(url_for('.index'))
         
-        current_app.logger.info(f"Успешно получен логин основного пользователя: {user_yandex_login}")
+        current_app.logger.info(f"Успешно получен логин основного пользователя для входа: {user_yandex_login}")
 
-        # --- Находим или создаем пользователя сервиса (User) ---
+        # --- Находим или создаем пользователя сервиса (User) --- 
         user = User.query.filter_by(yandex_login=user_yandex_login).first()
         if not user:
             current_app.logger.info(f"Создаем нового пользователя User для {user_yandex_login}")
             user = User(yandex_login=user_yandex_login)
             db.session.add(user)
-            # Commit нужен здесь, чтобы получить user.id для связей ниже
             try:
                 db.session.commit()
                 current_app.logger.info(f"Пользователь User {user_yandex_login} (ID: {user.id}) создан.")
@@ -137,170 +141,40 @@ def oauth_callback():
         else:
             current_app.logger.info(f"Найден существующий пользователь User {user_yandex_login} (ID: {user.id})")
 
-        # --- Логика MVP: Используем основной аккаунт как первый подключенный --- 
-        # В будущем здесь будет выбор клиента и аккаунта для подключения
-        # Пока создадим клиента по умолчанию, если его нет, и подключим этот аккаунт
-        
-        client_name = "Мой Клиент по умолчанию"
-        client = Client.query.filter_by(user_id=user.id, name=client_name).first()
-        if not client:
-            current_app.logger.info(f"Создаем клиента по умолчанию '{client_name}' для User ID {user.id}")
-            client = Client(name=client_name, user_id=user.id)
-            db.session.add(client)
-            # Commit нужен здесь, чтобы получить client.id
-            try:
-                db.session.commit()
-                current_app.logger.info(f"Клиент '{client_name}' (ID: {client.id}) создан.")
-            except Exception as e_commit:
-                db.session.rollback()
-                current_app.logger.exception(f"Ошибка создания Client в БД для User ID {user.id}")
-                flash("Ошибка сохранения данных клиента.", 'danger')
-                return redirect(url_for('.index'))
-        else:
-             current_app.logger.info(f"Найден клиент по умолчанию '{client_name}' (ID: {client.id}) для User ID {user.id}")
-
-        # Находим или создаем YandexAccount (в данном случае логин совпадает с логином User)
-        yandex_account_login = user_yandex_login 
-        yandex_account = YandexAccount.query.filter_by(client_id=client.id, login=yandex_account_login).first()
-        if not yandex_account:
-            current_app.logger.info(f"Создаем YandexAccount {yandex_account_login} для Client ID {client.id}")
-            yandex_account = YandexAccount(login=yandex_account_login, client_id=client.id)
-            db.session.add(yandex_account)
-             # Commit нужен здесь, чтобы получить yandex_account.id
-            try:
-                db.session.commit()
-                current_app.logger.info(f"YandexAccount {yandex_account_login} (ID: {yandex_account.id}) создан.")
-            except Exception as e_commit:
-                db.session.rollback()
-                current_app.logger.exception(f"Ошибка создания YandexAccount в БД для Client ID {client.id}")
-                flash("Ошибка сохранения данных аккаунта.", 'danger')
-                return redirect(url_for('.index'))
-        else:
-             current_app.logger.info(f"Найден YandexAccount {yandex_account_login} (ID: {yandex_account.id}) для Client ID {client.id}")
-
-        # --- Сохранение или обновление токена с ШИФРОВАНИЕМ --- 
-        token_entry = Token.query.filter_by(yandex_account_id=yandex_account.id).first()
-        
-        # Шифруем токены ПЕРЕД сохранением
-        encrypted_access = Token.encrypt_data(access_token)
-        encrypted_refresh = Token.encrypt_data(refresh_token) # encrypt_data обработает None
-
-        if token_entry:
-            current_app.logger.info(f"Обновляем существующий токен для YandexAccount ID {yandex_account.id}")
-            token_entry.encrypted_access_token = encrypted_access
-            if encrypted_refresh: # Обновляем RT только если он пришел и успешно зашифровался
-                token_entry.encrypted_refresh_token = encrypted_refresh
-            token_entry.expires_at = expires_at
-            token_entry.user_id = user.id # Убедимся, что user_id проставлен
-        else:
-            current_app.logger.info(f"Создаем новую запись токена для YandexAccount ID {yandex_account.id}")
-            token_entry = Token(
-                yandex_account_id=yandex_account.id,
-                user_id=user.id, # Связываем с User!
-                encrypted_access_token=encrypted_access,
-                encrypted_refresh_token=encrypted_refresh,
-                expires_at=expires_at
-            )
-            db.session.add(token_entry)
-        
-        try:
-            db.session.commit()
-            current_app.logger.info(f"Токен для YandexAccount ID {yandex_account.id} сохранен/обновлен в БД.")
-            
-            # === Сообщаем Flask-Login, что пользователь вошел (используем User) ===
-            login_user(user, remember=True) # <--- Передаем объект User
-            current_app.logger.info(f"Flask-Login notified for user: {user.yandex_login} (ID: {user.id}) (Remember Me: True)") 
-            # =====================================================
-
-        except Exception as e_commit:
-            db.session.rollback()
-            current_app.logger.exception(f"Ошибка сохранения Token в БД для YandexAccount ID {yandex_account.id}")
-            flash("Ошибка сохранения данных авторизации.", 'danger')
-            return redirect(url_for('.index'))
-
-        # Успешный вход
+        # --- Вход пользователя в систему --- 
+        login_user(user, remember=True) # Сообщаем Flask-Login
+        current_app.logger.info(f"Flask-Login notified for user: {user.yandex_login} (ID: {user.id}) (Remember Me: True)") 
         flash(f'Вход выполнен успешно для пользователя {user.yandex_login}.', 'success')
-        # Редирект на главную страницу приложения или дашборд
-        return redirect(url_for('main.index')) # Предполагаем, что есть main.index
+        
+        # --- РЕДИРЕКТ --- 
+        # Редиректим на список клиентов, т.к. это теперь основной интерфейс после логина
+        return redirect(url_for('.list_clients')) 
 
+    # --- Обработка ошибок на этапе получения токена или user_info --- 
     except requests.exceptions.RequestException as e:
-        print(f"Сетевая ошибка при обмене кода на токен: {e}")
-        flash("Сетевая ошибка при получении токена.", 'danger')
+        current_app.logger.error(f"Сетевая ошибка при обмене кода на токен или запросе user_info: {e}")
+        flash(f"Сетевая ошибка при взаимодействии с Яндексом: {e}", 'danger')
         return redirect(url_for('.index'))
-    except KeyError as e:
-        # Добавим response_data в лог ошибки
-        print(f"Ошибка: Отсутствует ключ '{e}' в ответе при обмене кода на токен. Ответ: {response_data if 'response_data' in locals() else 'Не удалось получить ответ'}")
-        flash("Ошибка формата ответа от Яндекса при получении токена.", 'danger')
-        return redirect(url_for('.index'))
-    except json.JSONDecodeError as e: # Добавляем обработку JSONDecodeError
-        print(f"Ошибка декодирования JSON при обмене кода на токен: {e}. Ответ: {response.text if 'response' in locals() else 'Ответ не получен'}")
+    except json.JSONDecodeError as e:
+        current_app.logger.error(f"Ошибка декодирования JSON при обмене кода на токен: {e}")
         flash("Ошибка чтения ответа от Яндекса.", 'danger')
         return redirect(url_for('.index'))
-    except Exception as e:
-        print(f"Непредвиденная ошибка при обмене кода на токен: {e}")
-        db.session.rollback() # Откатываем транзакцию БД, если она была начата
-        flash("Непредвиденная ошибка сервера.", 'danger')
+    except ValueError as e: # Ловим ошибку от get_yandex_user_info, если нет логина
+        current_app.logger.error(f"Ошибка получения данных пользователя Яндекса: {e}")
+        flash(f"Не удалось получить необходимые данные от Яндекса: {e}", 'danger')
         return redirect(url_for('.index'))
-
-# --- Вспомогательная функция для получения client_login --- 
-def get_yandex_client_login(access_token):
-    """Получает client_login пользователя через API Яндекс.Директ."""
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept-Language": "ru", # Язык ответных сообщений
-        # Client-Login не нужен для этого запроса
-    }
-    payload = json.dumps({
-        "method": "get",
-        "params": {
-            "FieldNames": ["Login"]
-        }
-    })
-    
-    # Получаем ПРАВИЛЬНЫЙ URL API v5 из конфигурации приложения
-    # Убираем старую логику с DIRECT_API_BASE_URL
-    api_v5_url = current_app.config.get('DIRECT_API_V5_URL')
-    if not api_v5_url:
-        current_app.logger.error("DIRECT_API_V5_URL не найден в конфигурации приложения!")
-        return None # Возвращаем None, чтобы вызвать ошибку в вызывающем коде
-        
-    clients_url = f"{api_v5_url}clients" # Формируем URL для /clients
-    current_app.logger.info(f"Запрос client_login к: {clients_url}") # Используем логгер
-    
-    try:
-        result = requests.post(clients_url, headers=headers, data=payload, timeout=15) # Добавляем таймаут
-        result.raise_for_status()
-        data = result.json()
-
-        if "error" in data:
-            error = data['error']
-            # Используем логгер
-            current_app.logger.error(f"Ошибка API при получении client_login: Код {error.get('error_code')}, {error.get('error_string')}: {error.get('error_detail')}")
-            return None
-        
-        # Извлекаем логин из ответа
-        if data.get('result') and data['result'].get('Clients') and len(data['result']['Clients']) > 0:
-            client_login = data['result']['Clients'][0].get('Login')
-            return client_login
-        else:
-            print("Неожиданный формат ответа API при получении client_login:", data)
-            return None
-
-    except requests.exceptions.RequestException as e:
-        print(f"Сетевая ошибка при запросе client_login: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        print(f"Ошибка декодирования JSON при запросе client_login: {e}")
-        return None
     except Exception as e:
-        print(f"Непредвиденная ошибка при запросе client_login: {e}")
-        return None
+        current_app.logger.exception(f"Непредвиденная ошибка в oauth_callback: {e}")
+        db.session.rollback() # Откатываем транзакцию БД на всякий случай
+        flash("Непредвиденная ошибка сервера при входе.", 'danger')
+        return redirect(url_for('.index'))
 
 # Роут /get_token больше не нужен, обмен происходит в callback
 
 # Убрали роут /test_api, он переедет в reports
 
 @auth_bp.route('/logout')
+@login_required
 def logout():
     """Выход пользователя из системы с использованием Flask-Login."""
     yandex_login = current_user.yandex_login if current_user.is_authenticated else None
@@ -312,3 +186,209 @@ def logout():
         # Если пользователь не был аутентифицирован, все равно перенаправляем
         flash("Вы вышли из системы.", 'info')
     return redirect(url_for('.index')) # Перенаправляем на страницу входа 
+
+# --- Управление Клиентами --- 
+
+@auth_bp.route('/clients')
+@login_required
+def list_clients():
+    """Отображает список клиентов текущего пользователя."""
+    user_clients = Client.query.filter_by(user_id=current_user.id).order_by(Client.name).all()
+    return render_template('auth/client_list.html', clients=user_clients)
+
+@auth_bp.route('/clients/add', methods=['GET', 'POST'])
+@login_required
+def add_client():
+    """Обрабатывает добавление нового клиента."""
+    if request.method == 'POST':
+        client_name = request.form.get('client_name')
+        if not client_name:
+            flash('Необходимо указать имя клиента.', 'warning')
+        else:
+            # Проверка на дубликат имени клиента у этого пользователя
+            existing_client = Client.query.filter_by(user_id=current_user.id, name=client_name).first()
+            if existing_client:
+                flash(f'Клиент с именем "{client_name}" уже существует.', 'warning')
+            else:
+                new_client = Client(name=client_name, user_id=current_user.id)
+                db.session.add(new_client)
+                try:
+                    db.session.commit()
+                    flash(f'Клиент "{client_name}" успешно добавлен.', 'success')
+                    return redirect(url_for('.list_clients'))
+                except Exception as e:
+                    db.session.rollback()
+                    flash(f'Ошибка при добавлении клиента: {e}', 'danger')
+                    current_app.logger.error(f"Error adding client for user {current_user.id}: {e}")
+    # Для GET запроса или если POST не удался
+    return render_template('auth/add_client.html')
+
+# --- OAuth Флоу Яндекса (с учетом Client ID) --- 
+
+@auth_bp.route('/yandex')
+@login_required
+def yandex_authorize():
+    """Редирект на Яндекс для авторизации. Добавляет client_id в state."""
+    client_id_to_link = request.args.get('client_id')
+    if not client_id_to_link:
+        flash("Не указан ID клиента для привязки аккаунта.", "danger")
+        # Редирект на список клиентов, чтобы пользователь выбрал
+        return redirect(url_for('.list_clients'))
+    
+    # Проверяем, что клиент принадлежит текущему пользователю
+    client = Client.query.filter_by(id=client_id_to_link, user_id=current_user.id).first()
+    if not client:
+        flash("Указанный клиент не найден или не принадлежит вам.", "danger")
+        return redirect(url_for('.list_clients'))
+
+    # Генерируем state, включая client_id
+    state_token = secrets.token_urlsafe(16)
+    state_with_client_id = f"client_id={client_id_to_link}:{state_token}"
+    session['oauth_state'] = state_with_client_id # Сохраняем state в сессию
+    
+    # !!! ЯВНО УКАЗЫВАЕМ ЯНДЕКСУ ПРАВИЛЬНЫЙ CALLBACK URL ДЛЯ ПРИВЯЗКИ !!!
+    redirect_uri_for_linking = url_for('auth.yandex_callback', _external=True)
+    # Проверка на http для локалки
+    if redirect_uri_for_linking.startswith('https'):
+        redirect_uri_for_linking = redirect_uri_for_linking.replace('https', 'http', 1)
+        print(f"Предупреждение: Заменяем https на http в redirect_uri для привязки аккаунта: {redirect_uri_for_linking}")
+
+    params = {
+        'response_type': 'code',
+        'client_id': Config.YANDEX_CLIENT_ID,
+        'state': state_with_client_id,
+        'redirect_uri': redirect_uri_for_linking, # <--- ДОБАВЛЯЕМ СЮДА
+        'force_confirm': 'yes' # Запрашивать подтверждение каждый раз (рекомендуется)
+    }
+    # Формируем URL и делаем редирект
+    auth_url = requests.Request('GET', YANDEX_AUTHORIZE_URL, params=params).prepare().url
+    return redirect(auth_url)
+
+@auth_bp.route('/yandex/callback')
+@login_required # Убедимся, что пользователь все еще залогинен
+def yandex_callback():
+    """Обработка callback от Яндекса после авторизации."""
+    code = request.args.get('code')
+    state = request.args.get('state')
+    session_state = session.pop('oauth_state', None)
+
+    # 1. Проверка state
+    if not state or state != session_state:
+        flash('Ошибка авторизации: несовпадение параметра state или он отсутствует.', 'danger')
+        current_app.logger.warning(f"OAuth state mismatch or missing. Received: {state}, Expected: {session_state}")
+        return redirect(url_for('.list_clients')) # Редирект на список клиентов
+
+    # 2. Извлечение client_id из state
+    try:
+        state_parts = state.split(':')
+        if len(state_parts) != 2 or not state_parts[0].startswith('client_id='):
+             raise ValueError("Invalid state format")
+        client_id_str = state_parts[0].split('=')[1]
+        client_id = int(client_id_str)
+    except (ValueError, IndexError):
+        flash('Ошибка авторизации: неверный формат параметра state.', 'danger')
+        current_app.logger.error(f"Invalid state format received: {state}")
+        return redirect(url_for('.list_clients'))
+
+    # 3. Проверка существования клиента и принадлежности пользователю
+    target_client = Client.query.filter_by(id=client_id, user_id=current_user.id).first()
+    if not target_client:
+        flash(f"Клиент с ID {client_id} не найден или не принадлежит вам.", "danger")
+        return redirect(url_for('.list_clients'))
+
+    # 4. Обмен кода на токен
+    token_data = {
+        'grant_type': 'authorization_code',
+        'code': code,
+        'client_id': Config.YANDEX_CLIENT_ID,
+        'client_secret': Config.YANDEX_CLIENT_SECRET
+    }
+    try:
+        response = requests.post(YANDEX_TOKEN_URL, data=token_data)
+        response.raise_for_status() # Проверка на HTTP ошибки
+        token_info = response.json()
+        access_token = token_info.get('access_token')
+        refresh_token = token_info.get('refresh_token')
+        expires_in = token_info.get('expires_in')
+        
+        if not access_token or not expires_in:
+             raise ValueError("Ответ API не содержит access_token или expires_in")
+        
+        expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+    except requests.exceptions.RequestException as e:
+        flash(f'Ошибка сети при получении токена от Яндекса: {e}', 'danger')
+        current_app.logger.error(f"Network error getting Yandex token: {e}")
+        return redirect(url_for('.list_clients'))
+    except (ValueError, json.JSONDecodeError) as e:
+        flash(f'Ошибка обработки ответа от Яндекса при получении токена: {e}', 'danger')
+        current_app.logger.error(f"Error processing Yandex token response: {e}. Response: {response.text[:500]}")
+        return redirect(url_for('.list_clients'))
+
+    # 5. Получение информации о пользователе (логин)
+    try:
+        user_info = get_yandex_user_info(access_token)
+        yandex_login = user_info.get('login')
+        if not yandex_login:
+            raise ValueError("Не удалось получить логин из информации о пользователе Яндекса.")
+            
+    except Exception as e:
+        flash(f'Не удалось получить информацию об аккаунте Яндекса: {e}', 'danger')
+        current_app.logger.error(f"Error getting Yandex user info: {e}")
+        return redirect(url_for('.list_clients'))
+
+    # 6. Проверка на дубликат YandexAccount для ЭТОГО клиента
+    existing_yandex_account = YandexAccount.query.filter_by(client_id=client_id, login=yandex_login).first()
+    if existing_yandex_account:
+         flash(f'Аккаунт Яндекс.Директ "{yandex_login}" уже привязан к клиенту "{target_client.name}".', 'warning')
+         return redirect(url_for('.list_clients'))
+         
+    # 7. Создание YandexAccount и Token
+    try:
+        # Создаем новый рекламный аккаунт
+        new_yandex_account = YandexAccount(
+            login=yandex_login,
+            client_id=client_id,
+            is_active=True # По умолчанию активен
+        )
+        db.session.add(new_yandex_account)
+        db.session.flush() # Получаем ID для new_yandex_account перед созданием Token
+        
+        # Шифруем токены
+        encrypted_access = Token.encrypt_data(access_token)
+        encrypted_refresh = Token.encrypt_data(refresh_token) if refresh_token else None
+
+        # Создаем запись с токеном
+        new_token = Token(
+            yandex_account_id=new_yandex_account.id,
+            user_id=current_user.id, # !!! Важно: привязка к текущему пользователю !!!
+            encrypted_access_token=encrypted_access,
+            encrypted_refresh_token=encrypted_refresh,
+            expires_at=expires_at
+        )
+        db.session.add(new_token)
+        db.session.commit()
+        
+        flash(f'Аккаунт Яндекс.Директ "{yandex_login}" успешно привязан к клиенту "{target_client.name}".', 'success')
+        current_app.logger.info(f"Successfully linked Yandex account {yandex_login} (ID: {new_yandex_account.id}) to Client ID {client_id} for User ID {current_user.id}")
+
+    except Exception as e:
+        db.session.rollback()
+        flash(f'Ошибка при сохранении аккаунта или токена в базе данных: {e}', 'danger')
+        current_app.logger.error(f"DB error linking Yandex account {yandex_login} to client {client_id}: {e}")
+        
+    # Перенаправляем на список клиентов после всех операций
+    return redirect(url_for('.list_clients'))
+
+# Вспомогательная функция (если ее еще нет)
+# def get_yandex_user_info(access_token):
+#     info_url = "https://login.yandex.ru/info"
+#     headers = {"Authorization": f"OAuth {access_token}"}
+#     try:
+#         response = requests.get(info_url, headers=headers)
+#         response.raise_for_status()
+#         return response.json()
+#     except requests.exceptions.RequestException as e:
+#         raise Exception(f"Ошибка сети при запросе Yandex user info: {e}") from e
+#     except json.JSONDecodeError:
+#         raise Exception(f"Ошибка декодирования JSON от Yandex user info. Ответ: {response.text[:200]}") 
