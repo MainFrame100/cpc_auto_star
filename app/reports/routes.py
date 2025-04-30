@@ -12,7 +12,7 @@ from . import reports_bp
 from .. import Config
 from .utils import (
     fetch_report, FIELDS_PLACEMENT, get_monday_and_sunday, get_week_start_dates,
-    collect_weekly_stats_for_last_n_weeks
+    update_client_statistics
 )
 from .. import db
 from ..models import (
@@ -21,6 +21,7 @@ from ..models import (
     WeeklyGeoStat, WeeklyDeviceStat, WeeklyDemographicStat
 )
 from sqlalchemy import func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 # Импортируем наш новый клиент и его исключение
 from ..api_clients.yandex_direct import YandexDirectClient, YandexDirectClientError, YandexDirectAuthError
@@ -473,16 +474,37 @@ def download_csv(campaign_id):
 @reports_bp.route('/client/<int:client_id>/summary')
 @login_required
 def client_summary(client_id):
-    """Отображает сводную статистику по выбранному клиенту (пока заглушка)."""
-    user = current_user
-    # Проверяем, принадлежит ли клиент текущему пользователю
-    client = Client.query.filter_by(id=client_id, user_id=user.id).first_or_404()
+    """Отображает сводную страницу статистики для клиента (ЗАГЛУШКА)."""
+    client = Client.query.filter_by(id=client_id, user_id=current_user.id).first_or_404()
+    # Пока просто рендерим заглушку
+    return render_template('reports/client_summary_stub.html', client=client)
+
+# --- Новый роут для запуска обновления данных клиента ---
+@reports_bp.route('/client/<int:client_id>/update_stats', methods=['POST'])
+@login_required
+def trigger_client_update(client_id):
+    """Запускает процесс обновления статистики для конкретного клиента."""
+    current_app.logger.info(f"Получен POST запрос на /client/{client_id}/update_stats от пользователя {current_user.id}")
     
-    current_app.logger.info(f"[reports.client_summary] User {user.yandex_login} viewing summary for client {client.name} (ID: {client_id})")
+    # Проверяем, что клиент принадлежит пользователю (на всякий случай, хотя utils делает это тоже)
+    client = Client.query.filter_by(id=client_id, user_id=current_user.id).first()
+    if not client:
+        flash("Клиент не найден или у вас нет прав на его обновление.", "danger")
+        return redirect(url_for('auth.list_clients')) # Редирект на список клиентов
     
-    # TODO: В будущем здесь будет логика получения и агрегации данных из БД
-    
-    return render_template(
-        'reports/client_summary_stub.html', 
-        client=client
-    )
+    try:
+        # Запускаем фоновый процесс? Пока нет, делаем синхронно.
+        current_app.logger.info(f"Запуск update_client_statistics для клиента {client.name} (ID: {client_id}) пользователем {current_user.id}")
+        success, message = update_client_statistics(client_id, current_user.id)
+        
+        if success:
+            flash(f"Обновление статистики для клиента '{client.name}' завершено. {message}", 'success')
+        else:
+            flash(f"Ошибка при обновлении статистики для клиента '{client.name}': {message}", 'danger')
+            
+    except Exception as e:
+        current_app.logger.exception(f"Критическая ошибка при вызове update_client_statistics для client_id={client_id}")
+        flash(f"Внутренняя ошибка сервера при запуске обновления для клиента '{client.name}'.", 'danger')
+
+    # Возвращаемся на страницу клиентов
+    return redirect(url_for('auth.list_clients'))

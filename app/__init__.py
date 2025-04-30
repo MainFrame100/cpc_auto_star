@@ -5,53 +5,13 @@ from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 from flask_migrate import Migrate
 from flask_login import LoginManager
+from cryptography.fernet import Fernet
+from logging.handlers import RotatingFileHandler
 
 # Импортируем класс конфигурации ИЗ ФАЙЛА config.py
 from .config import Config
 
-# Загружаем переменные окружения из файла .env в корне проекта
-# Лучше делать это до импорта конфигурации и блюпринтов
-# load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-# --- Конфигурация ---
-# УДАЛЕНО: Определение класса Config внутри __init__.py
-# class Config:
-#     SECRET_KEY = os.environ.get('SECRET_KEY') or os.urandom(24)
-#     SQLALCHEMY_TRACK_MODIFICATIONS = False
-#     # Определяем путь к БД здесь, чтобы он был доступен до создания app
-#     # Позже будем использовать DATABASE_URL из .env для PostgreSQL
-#     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
-#                               f"sqlite:///{os.path.join(os.path.abspath(os.path.dirname(__file__)), '..', 'instance', 'tokens.db')}"
-#
-#     # Определяем окружение (production или sandbox)
-#     YANDEX_ENV = os.environ.get('YANDEX_ENV', 'sandbox').lower() # По умолчанию песочница
-#
-#     # URL для API Яндекс.Директ
-#     DIRECT_API_V5_URL = os.environ.get('DIRECT_API_V5_URL', 'https://api.direct.yandex.com/json/v5/')
-#     DIRECT_API_V501_URL = os.environ.get('DIRECT_API_V501_URL', 'https://api.direct.yandex.com/json/v501/')
-#     DIRECT_API_SANDBOX_V5_URL = 'https://api-sandbox.direct.yandex.com/json/v5/'
-#     DIRECT_API_SANDBOX_V501_URL = 'https://api-sandbox.direct.yandex.com/json/v501/'
-#
-#     # URL для Яндекс.OAuth
-#     OAUTH_PRODUCTION_URL = 'https://oauth.yandex.ru/'
-#     OAUTH_SANDBOX_URL = 'https://oauth.yandex.ru/' # OAuth URL одинаковый для prod и sandbox
-#
-#     # Устанавливаем актуальные URL в зависимости от окружения
-#     if YANDEX_ENV == 'production':
-#         DIRECT_API_V5_URL = DIRECT_API_V5_URL
-#         DIRECT_API_V501_URL = DIRECT_API_V501_URL
-#         OAUTH_BASE_URL = OAUTH_PRODUCTION_URL
-#         print(f"*** YANDEX_ENV is '{YANDEX_ENV}'. Using PRODUCTION URLs. ***")
-#     else:
-#         DIRECT_API_V5_URL = DIRECT_API_SANDBOX_V5_URL
-#         DIRECT_API_V501_URL = DIRECT_API_SANDBOX_V501_URL
-#         OAUTH_BASE_URL = OAUTH_SANDBOX_URL # В данном случае он совпадает, но структура остается
-#         print(f"*** YANDEX_ENV is '{YANDEX_ENV}'. Using SANDBOX URLs. ***")
-#
-#     # Добавим переменные для OAuth client_id и client_secret
-#     YANDEX_CLIENT_ID = os.environ.get('YANDEX_CLIENT_ID')
-#     YANDEX_CLIENT_SECRET = os.environ.get('YANDEX_CLIENT_SECRET')
-#     YANDEX_SANDBOX_LOGIN = os.environ.get('YANDEX_SANDBOX_LOGIN') # Оставляем на случай отладки
 
 # Инициализация расширений (без app контекста)
 db = SQLAlchemy()
@@ -100,6 +60,60 @@ def configure_logging(app):
     logging.getLogger('werkzeug').setLevel(logging.INFO)
 
     app.logger.info(f'Logging configured. Level: {logging.getLevelName(log_level)}')
+
+    # --- Настройка логирования --- 
+    # Устанавливаем базовый уровень логирования для приложения
+    app.logger.setLevel(logging.INFO) 
+    
+    # Логирование в консоль (остается по умолчанию, но можно настроить формат)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(logging.INFO) # Уровень для консоли
+    stream_formatter = logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    )
+    stream_handler.setFormatter(stream_formatter)
+    # Удаляем стандартный обработчик Flask, если он есть, и добавляем свой
+    # (можно пропустить, если стандартный устраивает)
+    # if app.logger.hasHandlers():
+    #     app.logger.handlers.clear()
+    # app.logger.addHandler(stream_handler)
+
+    # Логирование в файл (только если не в режиме отладки)
+    app.logger.info(f"Проверка условий для файлового логирования: app.debug={app.debug}, app.testing={app.testing}")
+    if app.debug and not app.testing:
+        # Используем правильный разделитель для os.path.join
+        logs_dir = os.path.join(app.root_path, '..', 'logs') 
+        app.logger.info(f"Целевая папка для логов: {logs_dir}")
+        
+        if not os.path.exists(logs_dir):
+            app.logger.info(f"Папка {logs_dir} не существует, попытка создать...")
+            try:
+                os.makedirs(logs_dir)
+                app.logger.info(f"Создана папка для логов: {logs_dir}")
+            except OSError as e:
+                 app.logger.error(f"Ошибка создания папки логов {logs_dir}: {e}. Проверьте права доступа.")
+                 logs_dir = None # Сбрасываем путь, чтобы не пытаться создать файл
+        
+        # Проверяем еще раз, существует ли папка (могла не создаться из-за прав)
+        if logs_dir and os.path.exists(logs_dir):
+            log_file = os.path.join(logs_dir, 'cpc_auto_star.log')
+            app.logger.info(f"Настройка RotatingFileHandler для файла: {log_file}")
+            try:
+                # RotatingFileHandler: 10MB макс размер, храним 5 старых файлов
+                file_handler = RotatingFileHandler(log_file, maxBytes=1024*1024*10, backupCount=5, encoding='utf-8')
+                file_handler.setFormatter(logging.Formatter(
+                     '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]' # Подробный формат
+                ))
+                file_handler.setLevel(logging.INFO) # Уровень для файла
+                app.logger.addHandler(file_handler)
+                app.logger.info('=== Обработчик файлового лога успешно добавлен ===')
+                app.logger.info('=== CPC Auto Star startup (logged to file) ===') # Запись о старте приложения в лог
+            except Exception as e_handler:
+                 app.logger.error(f"Ошибка при создании или добавлении FileHandler для {log_file}: {e_handler}")
+        else:
+             app.logger.warning(f"Папка для логов {logs_dir} не доступна. Файловое логирование пропускается.")
+    else:
+         app.logger.info('Пропускаем настройку файлового логирования (app.debug или app.testing is True)')
 
 def create_app(config_class=Config):
     """Фабрика для создания экземпляра приложения Flask."""

@@ -1,8 +1,8 @@
-"""Initial database schema with User, Client, Account, Token etc.
+"""Initial migration based on corrected models
 
-Revision ID: a51cc16ede2c
+Revision ID: 22cbc82e4993
 Revises: 
-Create Date: 2025-04-28 15:27:15.393792
+Create Date: 2025-04-30 10:51:21.259118
 
 """
 from alembic import op
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = 'a51cc16ede2c'
+revision = '22cbc82e4993'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -70,8 +70,9 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_token_user_id'), ['user_id'], unique=False)
 
     op.create_table('weekly_campaign_stat',
+    sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('client_id', sa.Integer(), nullable=False),
@@ -79,10 +80,14 @@ def upgrade():
     sa.Column('clicks', sa.Integer(), nullable=True),
     sa.Column('cost', sa.Float(), nullable=True),
     sa.Column('conversions', sa.Integer(), nullable=True),
+    sa.Column('campaign_name', sa.String(), nullable=True),
+    sa.Column('campaign_type', sa.String(), nullable=True),
+    sa.Column('updated_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
-    sa.PrimaryKeyConstraint('week_start_date', 'campaign_id', 'yandex_account_id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('yandex_account_id', 'campaign_id', 'week_start_date', name='uq_weekly_campaign_stat')
     )
     with op.batch_alter_table('weekly_campaign_stat', schema=None) as batch_op:
         batch_op.create_index(batch_op.f('ix_weekly_campaign_stat_campaign_id'), ['campaign_id'], unique=False)
@@ -91,72 +96,128 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_weekly_campaign_stat_week_start_date'), ['week_start_date'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_campaign_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
-    op.create_table('weekly_demographic_stat',
+    op.create_table('daily_campaign_stat',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
-    sa.Column('gender', sa.String(length=20), nullable=False),
-    sa.Column('age_group', sa.String(length=20), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
+    sa.Column('date', sa.Date(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
     sa.Column('impressions', sa.Integer(), nullable=True),
     sa.Column('clicks', sa.Integer(), nullable=True),
     sa.Column('cost', sa.Float(), nullable=True),
+    sa.Column('conversions', sa.Integer(), nullable=True),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('week_start_date', 'campaign_id', 'gender', 'age_group', name='_week_demographic_uc')
+    sa.UniqueConstraint('yandex_account_id', 'date', 'campaign_id', name='uq_daily_campaign_stat')
+    )
+    with op.batch_alter_table('daily_campaign_stat', schema=None) as batch_op:
+        batch_op.create_index('idx_daily_client_camp_date', ['date', 'campaign_id', 'yandex_account_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_daily_campaign_stat_campaign_id'), ['campaign_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_daily_campaign_stat_date'), ['date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_daily_campaign_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_daily_campaign_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
+
+    op.create_table('weekly_demographic_stat',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('week_start_date', sa.Date(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
+    sa.Column('gender', sa.String(length=20), nullable=False),
+    sa.Column('age_group', sa.String(length=20), nullable=False),
+    sa.Column('yandex_account_id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=False),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
+    sa.Column('impressions', sa.Integer(), nullable=True),
+    sa.Column('clicks', sa.Integer(), nullable=True),
+    sa.Column('cost', sa.Float(), nullable=True),
+    sa.Column('conversions', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
+    sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('week_start_date', 'campaign_id', 'gender', 'age_group', 'yandex_account_id', name='_week_demographic_uc')
     )
     with op.batch_alter_table('weekly_demographic_stat', schema=None) as batch_op:
-        batch_op.create_index('idx_demographic_user_camp_week', ['yandex_account_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_demogr_client_camp_week', ['client_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_demogr_user_camp_week', ['user_id', 'campaign_id', 'week_start_date'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_campaign_id'), ['campaign_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_client_id'), ['client_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_week_start_date'), ['week_start_date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_demographic_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
     op.create_table('weekly_device_stat',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
     sa.Column('device_type', sa.String(length=50), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=False),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
     sa.Column('impressions', sa.Integer(), nullable=True),
     sa.Column('clicks', sa.Integer(), nullable=True),
     sa.Column('cost', sa.Float(), nullable=True),
+    sa.Column('conversions', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('week_start_date', 'campaign_id', 'device_type', name='_week_device_uc')
+    sa.UniqueConstraint('week_start_date', 'campaign_id', 'device_type', 'yandex_account_id', name='_week_device_uc')
     )
     with op.batch_alter_table('weekly_device_stat', schema=None) as batch_op:
-        batch_op.create_index('idx_device_user_camp_week', ['yandex_account_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_device_client_camp_week', ['client_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_device_user_camp_week', ['user_id', 'campaign_id', 'week_start_date'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_device_stat_campaign_id'), ['campaign_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_device_stat_client_id'), ['client_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_device_stat_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_device_stat_week_start_date'), ['week_start_date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_device_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_device_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
     op.create_table('weekly_geo_stat',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
-    sa.Column('location_id', sa.Integer(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
+    sa.Column('location_id', sa.BigInteger(), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('client_id', sa.Integer(), nullable=False),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
     sa.Column('impressions', sa.Integer(), nullable=True),
     sa.Column('clicks', sa.Integer(), nullable=True),
     sa.Column('cost', sa.Float(), nullable=True),
+    sa.Column('conversions', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('week_start_date', 'campaign_id', 'location_id', name='_week_geo_uc')
+    sa.UniqueConstraint('week_start_date', 'campaign_id', 'location_id', 'yandex_account_id', name='_week_geo_uc')
     )
     with op.batch_alter_table('weekly_geo_stat', schema=None) as batch_op:
-        batch_op.create_index('idx_geo_user_camp_week', ['yandex_account_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_geo_client_camp_week', ['client_id', 'campaign_id', 'week_start_date'], unique=False)
+        batch_op.create_index('idx_geo_user_camp_week', ['user_id', 'campaign_id', 'week_start_date'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_geo_stat_campaign_id'), ['campaign_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_geo_stat_client_id'), ['client_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_geo_stat_location_id'), ['location_id'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_geo_stat_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_geo_stat_week_start_date'), ['week_start_date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_geo_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_geo_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
     op.create_table('weekly_placement_stat',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('client_id', sa.Integer(), nullable=False),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
     sa.Column('placement', sa.String(length=512), nullable=True),
     sa.Column('ad_network_type', sa.String(length=50), nullable=True),
     sa.Column('impressions', sa.Integer(), nullable=True),
@@ -165,6 +226,7 @@ def upgrade():
     sa.Column('conversions', sa.Integer(), nullable=True),
     sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('week_start_date', 'campaign_id', 'yandex_account_id', 'placement', 'ad_network_type', name='_week_placement_uc')
@@ -176,16 +238,18 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_weekly_placement_stat_client_id'), ['client_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_placement_stat_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_placement_stat_week_start_date'), ['week_start_date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_placement_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_placement_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
     op.create_table('weekly_search_query_stat',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('week_start_date', sa.Date(), nullable=False),
-    sa.Column('campaign_id', sa.Integer(), nullable=False),
-    sa.Column('ad_group_id', sa.Integer(), nullable=False),
+    sa.Column('campaign_id', sa.BigInteger(), nullable=False),
+    sa.Column('ad_group_id', sa.BigInteger(), nullable=False),
     sa.Column('yandex_account_id', sa.Integer(), nullable=False),
     sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('client_id', sa.Integer(), nullable=False),
+    sa.Column('weekly_campaign_stat_id', sa.Integer(), nullable=True),
     sa.Column('query', sa.String(length=1024), nullable=True),
     sa.Column('impressions', sa.Integer(), nullable=True),
     sa.Column('clicks', sa.Integer(), nullable=True),
@@ -193,6 +257,7 @@ def upgrade():
     sa.Column('conversions', sa.Integer(), nullable=True),
     sa.ForeignKeyConstraint(['client_id'], ['client.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['weekly_campaign_stat_id'], ['weekly_campaign_stat.id'], ),
     sa.ForeignKeyConstraint(['yandex_account_id'], ['yandex_account.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('week_start_date', 'campaign_id', 'ad_group_id', 'yandex_account_id', 'query', name='_week_query_uc')
@@ -205,6 +270,7 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_weekly_search_query_stat_client_id'), ['client_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_search_query_stat_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_search_query_stat_week_start_date'), ['week_start_date'], unique=False)
+        batch_op.create_index(batch_op.f('ix_weekly_search_query_stat_weekly_campaign_stat_id'), ['weekly_campaign_stat_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_weekly_search_query_stat_yandex_account_id'), ['yandex_account_id'], unique=False)
 
     # ### end Alembic commands ###
@@ -214,6 +280,7 @@ def downgrade():
     # ### commands auto generated by Alembic - please adjust! ###
     with op.batch_alter_table('weekly_search_query_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_search_query_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_search_query_stat_weekly_campaign_stat_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_search_query_stat_week_start_date'))
         batch_op.drop_index(batch_op.f('ix_weekly_search_query_stat_user_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_search_query_stat_client_id'))
@@ -225,6 +292,7 @@ def downgrade():
     op.drop_table('weekly_search_query_stat')
     with op.batch_alter_table('weekly_placement_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_placement_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_placement_stat_weekly_campaign_stat_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_placement_stat_week_start_date'))
         batch_op.drop_index(batch_op.f('ix_weekly_placement_stat_user_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_placement_stat_client_id'))
@@ -235,26 +303,46 @@ def downgrade():
     op.drop_table('weekly_placement_stat')
     with op.batch_alter_table('weekly_geo_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_weekly_campaign_stat_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_week_start_date'))
+        batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_user_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_location_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_client_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_geo_stat_campaign_id'))
         batch_op.drop_index('idx_geo_user_camp_week')
+        batch_op.drop_index('idx_geo_client_camp_week')
 
     op.drop_table('weekly_geo_stat')
     with op.batch_alter_table('weekly_device_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_device_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_device_stat_weekly_campaign_stat_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_device_stat_week_start_date'))
+        batch_op.drop_index(batch_op.f('ix_weekly_device_stat_user_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_device_stat_client_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_device_stat_campaign_id'))
         batch_op.drop_index('idx_device_user_camp_week')
+        batch_op.drop_index('idx_device_client_camp_week')
 
     op.drop_table('weekly_device_stat')
     with op.batch_alter_table('weekly_demographic_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_weekly_campaign_stat_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_week_start_date'))
+        batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_user_id'))
+        batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_client_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_demographic_stat_campaign_id'))
-        batch_op.drop_index('idx_demographic_user_camp_week')
+        batch_op.drop_index('idx_demogr_user_camp_week')
+        batch_op.drop_index('idx_demogr_client_camp_week')
 
     op.drop_table('weekly_demographic_stat')
+    with op.batch_alter_table('daily_campaign_stat', schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f('ix_daily_campaign_stat_yandex_account_id'))
+        batch_op.drop_index(batch_op.f('ix_daily_campaign_stat_weekly_campaign_stat_id'))
+        batch_op.drop_index(batch_op.f('ix_daily_campaign_stat_date'))
+        batch_op.drop_index(batch_op.f('ix_daily_campaign_stat_campaign_id'))
+        batch_op.drop_index('idx_daily_client_camp_date')
+
+    op.drop_table('daily_campaign_stat')
     with op.batch_alter_table('weekly_campaign_stat', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_weekly_campaign_stat_yandex_account_id'))
         batch_op.drop_index(batch_op.f('ix_weekly_campaign_stat_week_start_date'))

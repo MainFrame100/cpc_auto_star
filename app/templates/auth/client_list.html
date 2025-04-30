@@ -45,10 +45,14 @@
                         {% endif %}
                     </div>
                     <div>
-                        {# Кнопка для просмотра статистики клиента (новый роут) #}
-                        <a href="{{ url_for('reports.client_summary', client_id=client.id) }}" class="btn btn-info btn-sm me-2">Статистика</a>
-                        {# Кнопка для запуска OAuth флоу с передачей client_id #}
-                        <a href="{{ url_for('auth.yandex_authorize', client_id=client.id) }}" class="btn btn-primary btn-sm">Добавить аккаунт Яндекса</a>
+                        {# Ссылка на добавление аккаунта Яндекса к ЭТОМУ клиенту #}
+                        <a href="{{ url_for('auth.yandex_authorize', client_id=client.id) }}" class="btn btn-sm btn-outline-primary">+ Добавить аккаунт Яндекса</a>
+                        {# Новая кнопка для запуска обновления статистики #}
+                        <form action="{{ url_for('reports.trigger_client_update', client_id=client.id) }}" method="POST" style="display: inline-block; margin-left: 5px;">
+                            <button type="submit" class="btn btn-sm btn-warning">Обновить статистику</button>
+                        </form>
+                        {# Ссылка на заглушку страницы статистики клиента #}
+                        <a href="{{ url_for('reports.client_summary', client_id=client.id) }}" class="btn btn-sm btn-info" style="margin-left: 5px;">Статистика</a>
                         {# Можно добавить кнопки "Редактировать", "Удалить клиента" #}
                     </div>
                 </li>

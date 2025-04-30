@@ -4,3 +4,10 @@ __pycache__/
 .env
 *.db
 instance/
+.vscode/
+.cursorrules
+.cursor/
+
+# Папка для логов
+logs/
+*.log
