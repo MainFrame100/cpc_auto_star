@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from app import db, login_manager
 from flask_login import UserMixin
+from flask import current_app
 from sqlalchemy import (
     Date, Integer, String, Float, DateTime, Boolean, LargeBinary, Text,
     ForeignKey, Index, UniqueConstraint, BigInteger

@@ -25,6 +25,10 @@ class YandexDirectTemporaryError(YandexDirectClientError):
     """Временная ошибка API (можно попробовать повторить запрос)."""
     pass
 
+class YandexDirectReportError(YandexDirectClientError):
+    """Ошибка, специфичная для API отчетов (например, отчет не готов после всех попыток)."""
+    pass
+
 class YandexDirectClient:
     def __init__(self, yandex_account_id: int, current_user_id: int):
         """
@@ -96,6 +100,9 @@ class YandexDirectClient:
             raise ValueError("DIRECT_API_V5_URL не настроен в конфигурации")
         if not self.api_v501_url:
             raise ValueError("DIRECT_API_V501_URL не настроен в конфигурации")
+            
+        # Добавляем URL для API Отчетов
+        self.reports_api_url = f"{self.api_v5_url}reports" # Базовый URL для отчетов
 
         # --- Формирование заголовков --- 
         self.headers = {
@@ -104,6 +111,13 @@ class YandexDirectClient:
             "Accept-Language": "ru",
             # "Use-Operator-Units": "true"
         }
+        
+        # Добавляем заголовки специфичные для API Отчетов
+        self.report_headers = self.headers.copy()
+        self.report_headers['returnMoneyInMicros'] = 'false'
+        self.report_headers['skipReportSummary'] = 'true'
+        # self.report_headers['skipColumnHeader'] = 'true' # Оставим заголовки столбцов
+        # self.report_headers['skipReportHeader'] = 'true' # Оставим заголовок отчета
         
         # Словарь для маппинга типов кампаний
         self.campaign_type_map = {
@@ -119,20 +133,12 @@ class YandexDirectClient:
             "CPM_PRICE": "Кампания с фиксированным СРМ"
         }
 
-    # === Декоратор для ретраев ===
-    # Определяем типы ошибок, после которых нужно делать ретрай
+    # === Логика ретраев для _make_request ===
     RETRYABLE_API_ERROR_CODES = {9000} # Пример: Internal server error
     RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504} # Too Many Requests, Server errors
 
     def _is_retryable_exception(self, exception):
         """Проверяет, стоит ли повторять запрос после этой ошибки."""
-        # Получаем исключение из retry_state - УБИРАЕМ ЭТО
-        # exception = retry_state.outcome.exception()
-
-        # Убираем проверку if not exception:
-        # if not exception:
-        #     return False
-
         # Сначала проверяем на явные временные ошибки
         if isinstance(exception, requests.exceptions.Timeout):
             current_app.logger.warning(f"Retryable exception (Timeout): {exception}")
@@ -165,7 +171,7 @@ class YandexDirectClient:
     def _make_request(self, service_path, payload, api_version='v5'):
         """
         Выполняет POST-запрос к указанному сервису API с ретраями.
-        (Остальные Args, Returns, Raises как раньше)
+        (Предназначен для стандартных запросов API, не для отчетов)
         """
         if api_version == 'v5':
             base_url = self.api_v5_url
@@ -184,10 +190,9 @@ class YandexDirectClient:
         data = json.dumps(payload)
 
         try:
-            result = requests.post(url, headers=self.headers, data=data, timeout=60) # Добавляем таймаут
+            # Используем self.headers (стандартные заголовки)
+            result = requests.post(url, headers=self.headers, data=data, timeout=60) 
             current_app.logger.debug(f"Request to {url} completed with status: {result.status_code}")
-            # Логируем заголовки ответа для отладки лимитов
-            # current_app.logger.debug(f"Response headers: {result.headers}") 
             
             # Обработка специфических кодов ответа Яндекса
             if result.status_code == 401: # Unauthorized
@@ -197,7 +202,6 @@ class YandexDirectClient:
             if result.status_code == 429: # Too Many Requests
                  raise YandexDirectTemporaryError("Слишком много запросов (429). Повторите попытку позже.", status_code=429)
             if result.status_code >= 500: # Server errors
-                 # Ошибки 5xx считаем временными
                  raise YandexDirectTemporaryError(f"Внутренняя ошибка сервера API ({result.status_code}) при запросе к {url}.", status_code=result.status_code)
 
             # Проверяем на остальные HTTP ошибки
@@ -217,8 +221,8 @@ class YandexDirectClient:
                 if error_code in {52, 53, 54, 56}: # Коды ошибок авторизации/токена
                      raise YandexDirectAuthError(message, status_code=result.status_code, api_error_code=error_code, api_error_detail=error_detail)
                 # Можно добавить коды временных ошибок API, если они известны
-                # elif error_code in {9000}:
-                #     raise YandexDirectTemporaryError(...) 
+                elif error_code in self.RETRYABLE_API_ERROR_CODES:
+                     raise YandexDirectTemporaryError(message, status_code=result.status_code, api_error_code=error_code, api_error_detail=error_detail) 
                 else:
                     raise YandexDirectClientError(message, status_code=result.status_code, api_error_code=error_code, api_error_detail=error_detail)
             
@@ -232,9 +236,20 @@ class YandexDirectClient:
             
             return result_payload # Возвращаем только содержимое ключа 'result'
 
+        except requests.exceptions.Timeout as e_timeout:
+             message = f"Network timeout during API request to {url}: {e_timeout}"
+             current_app.logger.warning(message) 
+             # Tenacity должен обработать
+             raise YandexDirectTemporaryError(message) from e_timeout
+        except requests.exceptions.ConnectionError as e_conn:
+             message = f"Network connection error during API request to {url}: {e_conn}"
+             current_app.logger.warning(message) 
+             # Tenacity должен обработать
+             raise YandexDirectTemporaryError(message) from e_conn
         except requests.exceptions.RequestException as e:
             message = f"Network error during API request to {url}: {e}"
             current_app.logger.warning(message) # Логируем как warning
+            # Считаем другие сетевые ошибки не временными для _make_request?
             raise YandexDirectClientError(message) from e
         except json.JSONDecodeError as e:
             message = f"JSON decoding error for response from {url}: {e}. Response text: {result.text[:500]}"
@@ -246,72 +261,235 @@ class YandexDirectClient:
             current_app.logger.exception(message) # Логируем с traceback
             raise YandexDirectClientError(message) from e
 
+    # === Метод для получения отчетов ===
+
+    def get_report(self, report_definition: dict) -> str:
+        """
+        Запрашивает, ожидает и возвращает сырые данные отчета (TSV).
+        Внутренний цикл обрабатывает ожидание (201/202) и ретраи временных ошибок.
+        """
+        if not isinstance(report_definition, dict) or 'params' not in report_definition:
+             raise ValueError("Некорректная структура report_definition. Ожидается dict с ключом 'params'.")
+
+        report_name = report_definition.get('params', {}).get('ReportName', 'UnnamedReport')
+        current_app.logger.info(f"Запрос отчета '{report_name}' для аккаунта {self.client_login}...")
+
+        # --- Используем сессию requests ---
+        session = requests.Session()
+        session.headers.update(self.report_headers)
+
+        # --- Цикл ожидания отчета с ретраями временных ошибок ---
+        retry_delay = 5 
+        attempt = 0
+        MAX_ATTEMPTS = 25  
+        RETRY_DELAY_MAX = 60 
+        temporary_error_retries = 0
+        MAX_TEMPORARY_ERROR_RETRIES = 5 
+
+        while attempt < MAX_ATTEMPTS:
+            attempt += 1
+            current_app.logger.info(f"  Попытка {attempt}/{MAX_ATTEMPTS}: Запрос статуса/данных отчета '{report_name}'...")
+            
+            try:
+                response = session.post(
+                    self.reports_api_url,
+                    json=report_definition,
+                    timeout=90 
+                )
+
+                status_code = response.status_code
+                request_id = response.headers.get("RequestId", "N/A")
+                units_used = response.headers.get("units", "N/A")
+                current_app.logger.debug(f"    Статус ответа: {status_code}. RequestId: {request_id}. Units: {units_used}")
+
+                # Сбрасываем счетчик временных ошибок при успешном запросе (даже если отчет не готов)
+                temporary_error_retries = 0 
+
+                # --- Обработка статусов ответа --- 
+                if status_code == 200: 
+                    current_app.logger.info(f"    Отчет '{report_name}' готов!")
+                    report_data = response.text 
+                    return report_data
+                elif status_code in [201, 202]: 
+                    retry_interval_header = response.headers.get("retryIn", str(retry_delay))
+                    try:
+                        current_retry_delay = min(max(int(retry_interval_header), 5), RETRY_DELAY_MAX)
+                    except ValueError:
+                        current_retry_delay = min(retry_delay * 2, RETRY_DELAY_MAX)
+                    retry_delay = current_retry_delay
+                    status_message = "принят в обработку (201)" if status_code == 201 else "еще не готов (202)"
+                    current_app.logger.info(f"    Отчет '{report_name}' {status_message}. Повтор через {current_retry_delay} сек...")
+                    time.sleep(current_retry_delay)
+                    continue 
+
+                # --- Обработка НЕ временных ошибок API отчетов --- 
+                elif status_code == 400:
+                     error_detail = self._get_error_detail(response)
+                     error_msg = f"Ошибка 400 в запросе отчета '{report_name}'. RequestId: {request_id}. Detail: {error_detail}"
+                     current_app.logger.error(error_msg)
+                     raise YandexDirectReportError(error_msg, status_code=status_code, api_error_detail=error_detail)
+                elif status_code == 401:
+                     raise YandexDirectAuthError(f"Ошибка авторизации (401) при запросе отчета '{report_name}'.", status_code=status_code)
+                elif status_code == 403:
+                     raise YandexDirectAuthError(f"Доступ запрещен (403) к API отчетов для '{report_name}'.", status_code=status_code)
+
+                # --- Обработка ВРЕМЕННЫХ ошибок API (429, 5xx) --- 
+                elif status_code == 429 or status_code >= 500:
+                     error_message_map = {
+                         429: "Слишком много запросов (429)",
+                         500: "Внутренняя ошибка сервера (500)",
+                         502: "Bad Gateway (502)",
+                         503: "Service Unavailable (503)",
+                         504: "Gateway Timeout (504)",
+                     }
+                     error_reason = error_message_map.get(status_code, f"Ошибка сервера ({status_code})")
+                     error_msg = f"{error_reason} при запросе отчета '{report_name}'. RequestId: {request_id}."
+                     current_app.logger.warning(error_msg + f" Попытка ретрая временной ошибки ({temporary_error_retries+1}/{MAX_TEMPORARY_ERROR_RETRIES})...")
+                     temporary_error_retries += 1
+                     if temporary_error_retries >= MAX_TEMPORARY_ERROR_RETRIES:
+                         current_app.logger.error(f"Превышено количество ретраев ({MAX_TEMPORARY_ERROR_RETRIES}) для временных ошибок API при запросе отчета '{report_name}'.")
+                         raise YandexDirectTemporaryError(f"{error_reason} после {MAX_TEMPORARY_ERROR_RETRIES} попыток.", status_code=status_code)
+                     server_retry_delay = min(wait_exponential(multiplier=1, min=5, max=30)(temporary_error_retries), RETRY_DELAY_MAX)
+                     time.sleep(server_retry_delay)
+                     continue
+                
+                else: # Другие неожиданные HTTP ошибки
+                    error_detail = self._get_error_detail(response)
+                    error_msg = f"Неожиданный статус {status_code} при запросе отчета '{report_name}'. RequestId: {request_id}. Detail: {error_detail}"
+                    current_app.logger.error(error_msg)
+                    raise YandexDirectReportError(error_msg, status_code=status_code, api_error_detail=error_detail)
+
+            # --- Обработка сетевых ошибок и таймаутов --- 
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e_net:
+                error_msg = f"Сетевая ошибка/таймаут при запросе отчета '{report_name}' (попытка {attempt}): {e_net}"
+                current_app.logger.warning(error_msg + f" Попытка ретрая временной ошибки ({temporary_error_retries+1}/{MAX_TEMPORARY_ERROR_RETRIES})...")
+                temporary_error_retries += 1
+                if temporary_error_retries >= MAX_TEMPORARY_ERROR_RETRIES:
+                     current_app.logger.error(f"Превышено количество ретраев ({MAX_TEMPORARY_ERROR_RETRIES}) для сетевых ошибок при запросе отчета '{report_name}'.")
+                     raise YandexDirectTemporaryError(f"Сетевая ошибка/таймаут после {MAX_TEMPORARY_ERROR_RETRIES} попыток.") from e_net
+                network_retry_delay = min(wait_exponential(multiplier=1, min=5, max=30)(temporary_error_retries), RETRY_DELAY_MAX)
+                time.sleep(network_retry_delay)
+                continue
+            
+            except requests.exceptions.RequestException as e_req:
+                error_msg = f"Критическая сетевая ошибка при запросе отчета '{report_name}' (попытка {attempt}): {e_req}"
+                current_app.logger.error(error_msg)
+                raise YandexDirectClientError(error_msg) from e_req
+            # --- Конец блока try ---
+
+        # --- Если цикл завершился без получения отчета --- 
+        error_msg = f"Отчет '{report_name}' не был готов или ошибка после {MAX_ATTEMPTS} попыток."
+        current_app.logger.error(error_msg)
+        raise YandexDirectReportError(error_msg)
+
+    def _get_error_detail(self, response: requests.Response) -> str:
+        """Вспомогательная функция для извлечения деталей ошибки из ответа."""
+        try:
+             # Пытаемся разобрать JSON, если есть
+             error_data = response.json().get('error', {})
+             return json.dumps(error_data, ensure_ascii=False)
+        except json.JSONDecodeError:
+             # Если не JSON, возвращаем текст
+             return response.text[:500] # Ограничиваем длину
+
+    # === Существующие методы ===
     def get_campaigns(self, selection_criteria=None, field_names=None):
         """
-        Получает список кампаний, делая запросы к v5 и v501 и объединяя результаты.
-
-        Args:
-            selection_criteria (dict, optional): Критерии отбора для API.
-            field_names (list, optional): Список запрашиваемых полей.
-
-        Returns:
-            list: Список словарей с данными кампаний, отсортированный по имени.
-                  Возвращает пустой список, если кампании не найдены или произошли ошибки.
-                  Каждый словарь дополнен полем 'readable_type'.
+        Получает список кампаний с использованием стандартного _make_request.
         """
-        if field_names is None:
-            field_names = ["Id", "Name", "State", "Status", "Type"]
-
         payload = {
             "method": "get",
             "params": {
-                "SelectionCriteria": selection_criteria or {},
+                "FieldNames": field_names or ["Id", "Name", "Type", "State", "Status"],
+            }
+        }
+        if selection_criteria:
+             payload["params"]["SelectionCriteria"] = selection_criteria
+             
+        return self._make_request("/campaigns", payload)
+
+    def get_clients(self):
+        """
+        Получает информацию о клиенте (для прямого рекламодателя).
+        Использует API v5.01.
+        """
+        payload = {
+             "method": "get",
+             "params": {
+                 "FieldNames": ["Login", "ClientId", "ClientInfo", "Grants", "Representatives", "Settings", "Type"]
+             }
+         }
+        return self._make_request("/clients", payload, api_version='v501')
+         
+    def get_agency_clients(self):
+        """
+        Получает список клиентов агентства.
+        """
+        payload = {
+             "method": "get",
+             "params": {
+                 "FieldNames": ["Login", "ClientId", "ClientInfo"]
+             }
+         }
+        # Использует стандартный сервис clients API v5
+        return self._make_request("/agencyclients", payload)
+
+    def get_adgroups(self, campaign_ids: list[int], field_names: list[str] = ["Id", "Name", "CampaignId", "Status", "Type"]):
+        """
+        Получает группы объявлений для указанных кампаний.
+        """
+        payload = {
+            "method": "get",
+            "params": {
+                "SelectionCriteria": {
+                    "CampaignIds": campaign_ids
+                },
                 "FieldNames": field_names
             }
         }
+        return self._make_request("/adgroups", payload)
 
-        all_campaigns = []
-        campaign_ids = set()
-        errors = []
-
-        # Запрос к v5
-        try:
-            result_v5 = self._make_request('campaigns', payload, api_version='v5')
-            if result_v5 and 'Campaigns' in result_v5:
-                for campaign in result_v5['Campaigns']:
-                    if campaign['Id'] not in campaign_ids:
-                        all_campaigns.append(campaign)
-                        campaign_ids.add(campaign['Id'])
-        except YandexDirectClientError as e:
-            current_app.logger.warning(f"Failed to get campaigns from v5 for account {self.client_login}: {e}")
-            errors.append(f"v5: {e}")
-
-        # Запрос к v501
-        try:
-            result_v501 = self._make_request('campaigns', payload, api_version='v501')
-            if result_v501 and 'Campaigns' in result_v501:
-                 for campaign in result_v501['Campaigns']:
-                    if campaign['Id'] not in campaign_ids:
-                        all_campaigns.append(campaign)
-                        campaign_ids.add(campaign['Id'])
-        except YandexDirectClientError as e:
-            current_app.logger.warning(f"Failed to get campaigns from v501 for account {self.client_login}: {e}")
-            errors.append(f"v501: {e}")
-
-        if errors:
-            # Сообщаем пользователю об ошибках
-            flash(f"Не удалось получить полный список кампаний для аккаунта {self.client_login}. Ошибки: {'; '.join(errors)}", 'warning')
-            current_app.logger.error(f"Encountered errors while fetching campaigns for {self.client_login}: {'; '.join(errors)}")
+    def set_adgroup_bids(self, bids: list[dict]):
+        """
+        Устанавливает ставки для групп объявлений.
+        Ожидает список словарей, каждый из которых содержит AdGroupId и Bid.
+        """
+        payload = {
+            "method": "set",
+            "params": {
+                "Bids": bids # [{ "AdGroupId": id1, "Bid": bid1 }, { "AdGroupId": id2, "Bid": bid2 }, ...]
+            }
+        }
+        return self._make_request("/bids", payload)
         
-        # Добавляем читаемый тип и сортируем
-        processed_campaign_list = []
-        for campaign in all_campaigns:
-            campaign_type_code = campaign.get('Type')
-            campaign['readable_type'] = self.campaign_type_map.get(campaign_type_code, campaign_type_code)
-            processed_campaign_list.append(campaign)
-        
-        return sorted(processed_campaign_list, key=lambda c: c.get('Name', ''))
+    def suspend_adgroups(self, adgroup_ids: list[int]):
+        """
+        Останавливает показы для указанных групп объявлений.
+        """
+        payload = {
+            "method": "suspend",
+            "params": { 
+                "SelectionCriteria": { 
+                    "Ids": adgroup_ids 
+                 } 
+            }
+        }
+        return self._make_request("/adgroups", payload)
 
-    # --- Другие методы API клиента будут добавлены здесь ---
-    # def get_report(...)
-    # def block_placements(...) 
+    def resume_adgroups(self, adgroup_ids: list[int]):
+        """
+        Возобновляет показы для указанных групп объявлений.
+        """
+        payload = {
+            "method": "resume",
+            "params": { 
+                "SelectionCriteria": { 
+                    "Ids": adgroup_ids 
+                 } 
+            }
+        }
+        return self._make_request("/adgroups", payload)
+
+    def get_campaign_type_display_name(self, campaign_type_api_name: str) -> str:
+         """Возвращает человекочитаемое название типа кампании."""
+         return self.campaign_type_map.get(campaign_type_api_name, campaign_type_api_name) # Возвращаем исходное, если нет в мапе 

@@ -1,6 +1,6 @@
 import requests
 import json
-from flask import redirect, url_for, session, flash, render_template, request, Response, current_app
+from flask import redirect, url_for, session, flash, render_template, request, Response, current_app, jsonify
 from flask_login import login_required, current_user
 from markupsafe import escape
 import traceback
@@ -11,7 +11,7 @@ import csv
 from . import reports_bp
 from .. import Config
 from .utils import (
-    fetch_report, FIELDS_PLACEMENT, get_monday_and_sunday, get_week_start_dates,
+    FIELDS_PLACEMENT, get_monday_and_sunday, get_week_start_dates,
     update_client_statistics
 )
 from .. import db
@@ -288,8 +288,14 @@ def load_initial_data():
     user = current_user
     print(f"Запуск load_initial_data для пользователя {user.yandex_login}...") # Заменил logger на print для примера
     try:
-        # Вызываем функцию сбора статистики, передавая ID пользователя
-        success, message = collect_weekly_stats_for_last_n_weeks(current_user.id, n_weeks=1) # Используем user_id
+        # Получаем ID клиента из запроса
+        client_id = request.form.get('client_id', type=int)
+        if not client_id:
+            flash("Не указан ID клиента", "danger")
+            return redirect(url_for('.campaigns'))
+            
+        # Вызываем новую функцию обновления статистики
+        success, message = update_client_statistics(client_id, user.id)
         if success:
             flash(f"Сбор данных запущен. {message}", 'success')
         else:
@@ -300,9 +306,7 @@ def load_initial_data():
         traceback.print_exc()
         flash(f"Не удалось запустить сбор данных. {error_message}", "danger")
     
-    # Перенаправляем обратно на страницу кампаний (пока что)
-    # TODO: Возможно, лучше перенаправлять на отдельную страницу статуса или дашборд
-    return redirect(url_for('.campaigns')) # '.' означает текущий блюпринт
+    return redirect(url_for('.campaigns'))
 
 @reports_bp.route('/update_data', methods=['POST'])
 @login_required
@@ -310,15 +314,29 @@ def update_data():
     """Запускает обновление статистики за последние N недель (для теста N=1)."""
     client_login = current_user.yandex_login
     print(f"Запуск update_data для пользователя {client_login}...")
-    # Для MVP обновление делает то же самое, ДЛЯ ТЕСТА ставим n_weeks=1
-    success, message = collect_weekly_stats_for_last_n_weeks(yandex_login=client_login, n_weeks=1)
     
-    if success:
-        flash(f"Обновление данных запущено/завершено: {message}", "success")
-    else:
-        flash(f"Ошибка при обновлении данных: {message}", "danger")
+    try:
+        # Получаем ID клиента из запроса
+        client_id = request.form.get('client_id', type=int)
+        if not client_id:
+            flash("Не указан ID клиента", "danger")
+            return redirect(url_for('.campaigns'))
+            
+        # Вызываем новую функцию обновления статистики
+        success, message = update_client_statistics(client_id, current_user.id)
         
-    return redirect(url_for('.campaigns'))
+        if success:
+            flash(f"Обновление данных запущено/завершено: {message}", "success")
+        else:
+            flash(f"Ошибка при обновлении данных: {message}", "danger")
+            
+        return redirect(url_for('.campaigns'))
+    except Exception as e:
+        error_message = f"Непредвиденная ошибка при обновлении данных: {e}"
+        print(f"  {error_message}")
+        traceback.print_exc()
+        flash(f"Не удалось обновить данные. {error_message}", "danger")
+        return redirect(url_for('.campaigns'))
 
 # --- Роут для скачивания CSV --- 
 
@@ -406,7 +424,7 @@ def download_csv(campaign_id):
                 
                 # Запрашиваем ВСЕ данные за период, без пагинации
                 stats_query = db.session.query(Model).filter(
-                    Model.user_id == user.id,
+                    Model.user_id == current_user.id,
                     Model.campaign_id == campaign_id,
                     Model.week_start_date.in_(week_start_dates)
                 ).order_by(Model.week_start_date, Model.cost.desc()).all()
